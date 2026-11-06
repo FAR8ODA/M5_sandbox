@@ -1,0 +1,30 @@
+# Python cache
+__pycache__/
+
+# ROS 2 
+build/
+install/
+log/
+
+# venv
+.venv/
+venv/
+
+# ide
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# RealSense
+bags/
+tools/
+
+#images
+images/
+# recorded data
+milestone*_data/
+*.db3
+*.mp4
