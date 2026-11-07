@@ -93,7 +93,7 @@ class LapCounterNode(Node):
         """Initialize parameters, state, subscribers, publishers and timers."""
         super().__init__('lap_counter_node')
 
-        # Launch parameters (set in milestone4_py.py):
+        # Main tuning parameters (values in config/milestone4.yaml):
         self.declare_parameter('num_laps', 3)
         self.declare_parameter('color_topic', '/camera/camera/color/image_raw')
         self.declare_parameter('use_camera', True)

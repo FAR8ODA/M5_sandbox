@@ -253,7 +253,7 @@ class SafetyNode(Node):
         """Initialize parameters, ROS communication, safety state and the watchdog."""
         super().__init__('safety_node')
 
-        # The launch file sets these; the class constants are the defaults.
+        # Values come from config/milestone4.yaml; the class constants are fallbacks.
         self.declare_parameter('ttc_margin', self.TTC_MARGIN)
         self.declare_parameter('drive_speed', self.DRIVE_SPEED)
         self.declare_parameter('stale_timeout', self.STALE_TIMEOUT)

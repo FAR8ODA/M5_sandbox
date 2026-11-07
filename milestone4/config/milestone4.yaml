@@ -1,0 +1,148 @@
+# Milestone 4 parameters: the single place to tune the car.
+#
+# milestone4_py.py loads this file into every node. A launch argument given on the command
+# line (e.g. max_speed:=1.5) overrides the value here for that run only; to change a value
+# for good, edit it here and rebuild (colcon build --packages-select milestone4), or point
+# the launch at a copy with params_file:=/path/to/copy.yaml.
+#
+# Keep the decimal point on decimal values (1.0, not 1): ROS parameters are typed, and a
+# node refuses an integer where it declared a float.
+#
+# The defaults in the node code are only fallbacks for running a node on its own (and for
+# the unit tests); this file is what the car actually uses.
+
+# Shared by several nodes. Defined once so the planner and the safety node always use the
+# same car geometry and braking model, and both camera nodes the same camera mounting.
+/**:
+  ros__parameters:
+    # Car geometry (gap_follow_node, safety_node)
+    wheelbase: 0.33           # front to rear axle (m)
+    car_half_width: 0.15      # half the car's width (m)
+    path_margin: 0.05         # extra width each side of the path corridor (m)
+
+    # Braking model (gap_follow_node, safety_node; see braking.py)
+    a_brake: 2.0              # braking deceleration; measure it: a = v^2 / (2 d) (m/s^2)
+    t_react: 0.15             # delay before the brakes act (s)
+    ttc_margin: 0.1           # extra time added to the variable TTC threshold (s)
+    stop_margin: 0.25         # gap AEB leaves in front of the LiDAR (m)
+
+    # Input timeouts (gap_follow_node, safety_node)
+    scan_timeout: 0.15        # fused scan older than this: use the raw /scan (s)
+    odom_timeout: 0.5         # odometry older than this: use the commanded speed (s)
+
+    # Camera mounting (camera_scan_node, depth_scan_node)
+    mount_height: 0.187       # camera height above the floor (m)
+    pitch_deg: -5.3           # camera pitch (degrees, positive = tilted down)
+
+gap_follow_node:
+  ros__parameters:
+    # Speed
+    max_speed: 1.0            # top speed on a clear straight; keep equal to safety drive_speed (m/s)
+    min_speed: 0.35           # lowest request unless the braking limit is lower (m/s)
+    pass_speed: 0.55          # speed while passing a camera-confirmed box (m/s)
+    a_lat: 2.5                # sideways grip for the cornering limit (m/s^2)
+    a_accel: 2.0              # how fast the requested speed may rise (m/s^2)
+    plan_factor: 2.5          # planner keeps TTC >= this x the TTC needed to stop
+    box_slow_range: 1.5       # a confirmed box nearer than this starts a pass (m)
+    box_hold: 0.3             # keep a box label this long after it was last seen (s)
+    pass_hold: 0.5            # keep passing this long after the last box ahead (s)
+
+    # Disparity extender
+    fov_deg: 90.0             # target searched within +/- this angle (degrees)
+    max_range: 5.0            # ranges capped at this (m)
+    disparity_threshold: 0.3  # range jump that counts as an edge (m)
+    margin: 0.20              # clearance beyond half the car at edges (m)
+    box_margin: 0.25          # clearance at camera-confirmed boxes (m)
+    deep_fraction: 0.95       # beams this close to the deepest count as the gap (0-1)
+    min_gap_range: 0.4        # no target if the deepest beam is nearer (m)
+
+    # Steering (pure pursuit)
+    gain: 1.0                 # steering gain
+    lookahead: 2.0            # longest lookahead (m)
+    min_lookahead: 0.5        # shortest lookahead (m)
+    lookahead_time: 0.8       # lookahead = speed x this, between the two limits (s)
+    lidar_x: 0.27             # LiDAR distance ahead of the rear axle (m)
+    max_steering: 0.4         # steering limit (rad)
+    smoothing: 0.6            # weight of the previous steering command (0-1)
+    side_angle_deg: 80.0      # side check starts at this bearing (degrees)
+    side_max_angle_deg: 120.0 # side check ends at this bearing (degrees)
+    side_min_range: 0.10      # nearer side readings are the car itself (m)
+    side_clear: 0.25          # go straight if the turning side is nearer (m)
+
+safety_node:
+  ros__parameters:
+    drive_speed: 1.0          # speed cap; keep equal to gap_follow max_speed (m/s)
+    stale_timeout: 0.25       # brake when requests or scans are older (s)
+    slow_factor: 2.0          # soft stage keeps TTC >= this x the TTC needed to stop
+    blocked_time: 1.0         # held at 0 m/s this long: latched stop (s)
+    min_closing: 0.1          # slower closing speeds never trigger AEB (m/s)
+
+    # Moving obstacles
+    track_obstacles: false    # true: AEB also uses obstacle speeds
+    obstacle_deadband: 0.5    # slower obstacle speeds are noise (m/s)
+    max_obstacle_speed: 3.0   # faster readings are not believed (m/s)
+    obstacle_persist_scans: 4 # a speed must last this many scans
+
+fusion_node:
+  ros__parameters:
+    camera_timeout: 0.2       # older camera scans are ignored (s)
+    max_shift: 0.3            # cap on the ego-motion correction (m)
+    cam_x: 0.0                # camera ahead of the LiDAR (m); tune in rviz
+    cam_y: 0.0                # camera left of the LiDAR (m)
+    cam_yaw_deg: 0.0          # camera heading offset (degrees, left positive)
+    assoc_tol: 0.25           # camera and LiDAR ranges this close are one object (m)
+    assoc_window: 4           # LiDAR beams searched each side of a camera point
+    persist_frames: 3         # frames in a row before a depth-only point is trusted
+
+lap_counter_node:
+  ros__parameters:
+    num_laps: 3               # laps before the latched stop
+    color_topic: /camera/camera/color/image_raw
+    similarity_threshold: 0.8 # score meaning "back at the start"
+    rearm_threshold: 0.5      # score must drop below this before the next lap
+    camera_weight: 0.5        # weight of the camera similarity
+    lidar_weight: 0.5         # weight of the LiDAR similarity
+    min_lap_distance: 15.0    # shortest lap, about 3/4 of a lap (m)
+    lap_distance_fraction: 0.85  # later laps must be this x the first lap's length
+    blind_time: 5.0           # no lap counted this long after the last one (s)
+    lidar_shift_deg: 10.0     # heading search for the LiDAR match (degrees)
+
+camera_scan_node:
+  ros__parameters:
+    color_topic: /camera/camera/color/image_raw
+    color_info_topic: /camera/camera/color/camera_info
+    scan_topic: camera_scan
+    box_scan_topic: camera_box_scan
+    scan_frame: camera_link
+    num_beams: 180
+    range_min: 0.05           # (m)
+    range_max: 4.0            # also reported when nothing is seen (m)
+    ignore_bottom_rows: 30    # image rows showing the car body
+    box_contact_rows: 4       # a box must stand on the floor within these rows
+
+    # HSV thresholds (H 0-179, S and V 0-255)
+    dark_v_max: 70            # ducting: V at or below this
+    use_box_color: true
+    box_h_min: 5              # cardboard hue range
+    box_h_max: 30
+    box_s_min: 60             # cardboard minimum saturation (floor is near 0)
+    box_v_min: 60
+    open_kernel: 5            # speckle removal; 0 or 1 disables it
+    publish_debug: true
+
+depth_scan_node:
+  ros__parameters:
+    depth_topic: /camera/camera/depth/image_rect_raw
+    depth_info_topic: /camera/camera/depth/camera_info
+    scan_topic: depth_scan
+    scan_frame: camera_depth_frame
+    band_top: -40             # rows above the principal point (negative = up)
+    band_bottom: 90           # rows below the principal point
+    num_beams: 90
+    percentile: 10.0          # low percentile = nearest object, robust to noise
+    min_valid_frac: 0.05      # else the strip reports nothing seen
+    range_min: 0.15           # (m)
+    range_max: 2.5            # also reported when nothing is seen (m)
+    floor_reject: true
+    min_height: 0.05          # lower points are floor (m)
+    max_height: 0.40          # higher points are ignored (m)

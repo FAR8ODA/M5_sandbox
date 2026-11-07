@@ -1,6 +1,9 @@
 """
 Launch file for Milestone 4: LiDAR-primary driving with camera fusion and AEB.
 
+Every node's parameters come from config/milestone4.yaml (or params_file:=...). A launch
+argument given on the command line overrides the file for that run only:
+
 On the car (after starting the F1Tenth stack and, unless start_camera:=true, the camera):
     ros2 launch milestone4 milestone4_py.py
     ros2 launch milestone4 milestone4_py.py max_speed:=1.5 a_brake:=2.5
@@ -12,26 +15,190 @@ In the simulator:
 Only safety_node publishes to /drive. Every other node sends requests on /drive_request.
 """
 
-from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
+from typing import Callable, Dict, List, Tuple
+
+from launch import LaunchContext, LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
-def as_float(name: str) -> PythonExpression:
+def as_bool(value: str) -> bool:
     """
-    Read a launch argument as a float, so max_speed:=2 still gives a float parameter.
+    Read a launch argument as a bool.
 
     Args:
-        name (str): Launch argument name.
+        value (str): 'true' or 'false' (any case).
 
     Returns:
-        PythonExpression: Substitution that evaluates to the argument as a float.
+        bool: The value.
+
+    Raises:
+        ValueError: If the value is not true or false.
     """
-    return PythonExpression(['float(', LaunchConfiguration(name), ')'])
+    text = value.strip().lower()
+    if text not in ('true', 'false'):
+        raise ValueError(f'expected true or false, got {value!r}')
+    return text == 'true'
+
+
+# Tuning arguments: (argument, description, type). They default to '' (not given), so the
+# YAML file decides; only arguments given on the command line override it.
+TUNING_ARGS: List[Tuple[str, str, Callable]] = [
+    # Driving
+    ('max_speed', 'Highest speed on a clear straight, also the safety cap (m/s).', float),
+    ('pass_speed', 'Speed cap while passing a camera-confirmed box (m/s).', float),
+    ('lookahead', 'Longest pure-pursuit distance (m).', float),
+    ('gain', 'Pure-pursuit steering gain.', float),
+    ('a_lat', 'Sideways grip for the cornering speed (m/s^2).', float),
+    ('margin', 'Clearance kept at obstacle and barrier edges (m).', float),
+    ('smoothing', 'Weight of the previous steering command (0-1).', float),
+    ('deep_fraction', 'Beams this close to the deepest count as the gap (0-1).', float),
+    ('lidar_x', 'LiDAR distance ahead of the rear axle, for pure pursuit (m).', float),
+    # Safety (the braking model is shared by gap_follow_node and safety_node)
+    ('ttc_margin', 'Extra time added to the variable TTC threshold (s).', float),
+    ('a_brake', 'Measured braking deceleration (m/s^2).', float),
+    ('stop_margin', 'Gap AEB leaves in front of the LiDAR (m).', float),
+    ('track_obstacles', 'true: AEB also uses obstacle speeds (moving ones).', as_bool),
+    # Lap counter
+    ('num_laps', 'Laps before the latched stop.', int),
+    ('similarity_threshold', 'Lap score meaning "back at the start".', float),
+    ('rearm_threshold', 'Lap score must drop below this before the next lap.', float),
+    ('min_lap_distance', 'Shortest possible lap, about 3/4 of a lap (m).', float),
+    # Camera mounting
+    ('cam_x', 'Camera position ahead of the LiDAR (m).', float),
+    ('cam_yaw_deg', 'Camera heading relative to the LiDAR (degrees).', float),
+]
+
+# Which node parameter each tuning argument sets: {node: {parameter: argument}}.
+# max_speed sets both the planner's top speed and the safety node's cap, so they never differ.
+OVERRIDES: Dict[str, Dict[str, str]] = {
+    'gap_follow_node': {
+        'max_speed': 'max_speed', 'pass_speed': 'pass_speed', 'lookahead': 'lookahead',
+        'gain': 'gain', 'a_lat': 'a_lat', 'margin': 'margin', 'smoothing': 'smoothing',
+        'deep_fraction': 'deep_fraction', 'lidar_x': 'lidar_x', 'a_brake': 'a_brake',
+        'ttc_margin': 'ttc_margin', 'stop_margin': 'stop_margin',
+    },
+    'safety_node': {
+        'drive_speed': 'max_speed', 'ttc_margin': 'ttc_margin', 'a_brake': 'a_brake',
+        'stop_margin': 'stop_margin', 'track_obstacles': 'track_obstacles',
+    },
+    'lap_counter_node': {
+        'num_laps': 'num_laps', 'similarity_threshold': 'similarity_threshold',
+        'rearm_threshold': 'rearm_threshold', 'min_lap_distance': 'min_lap_distance',
+    },
+    'fusion_node': {
+        'cam_x': 'cam_x', 'cam_yaw_deg': 'cam_yaw_deg',
+    },
+}
+
+
+def overrides_for(node: str, context: LaunchContext) -> dict:
+    """
+    Collect the parameters a node gets from launch arguments given on the command line.
+
+    Args:
+        node (str): Node name, a key of OVERRIDES.
+        context (LaunchContext): Launch context holding the argument values.
+
+    Returns:
+        dict: {parameter: typed value} for every given argument; empty if none were given.
+    """
+    casts = {name: cast for name, _, cast in TUNING_ARGS}
+    params = {}
+    for param, arg in OVERRIDES.get(node, {}).items():
+        value = LaunchConfiguration(arg).perform(context).strip()
+        if value:
+            params[param] = casts[arg](value)
+    return params
+
+
+def launch_nodes(context: LaunchContext) -> list:
+    """
+    Create the nodes once the launch arguments are known.
+
+    Each node gets the parameter file first, then its overrides; ROS applies them in order,
+    so the overrides win.
+
+    Args:
+        context (LaunchContext): Launch context holding the argument values.
+
+    Returns:
+        list: The RealSense include and the Milestone 4 nodes.
+    """
+    params_file = LaunchConfiguration('params_file').perform(context)
+    use_camera = as_bool(LaunchConfiguration('use_camera').perform(context))
+    use_depth = as_bool(LaunchConfiguration('use_depth').perform(context))
+    start_camera = as_bool(LaunchConfiguration('start_camera').perform(context))
+    odom = [('ego_racecar/odom', LaunchConfiguration('odom_topic').perform(context))]
+
+    def params(node: str, extra: dict | None = None) -> list:
+        """Parameter file, then the sensor switches, then the command-line overrides."""
+        return [params_file, {**(extra or {}), **overrides_for(node, context)}]
+
+    actions = []
+
+    # Sensors ------------------------------------------------------------------------------------
+
+    # RealSense driver (Vision intro, slide 6), only if start_camera:=true.
+    if use_camera and start_camera:
+        actions.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([FindPackageShare('realsense2_camera'),
+                                      'launch', 'rs_launch.py'])),
+            launch_arguments={'enable_color': 'true', 'enable_depth': 'true'}.items(),
+        ))
+
+    if use_camera:
+        # Colour image -> /camera_scan (walls + boxes) and /camera_box_scan (boxes only).
+        # Track walls are matte black, which absorbs infrared, so walls are found by colour.
+        actions.append(Node(
+            package='milestone4', executable='camera_scan_node', name='camera_scan_node',
+            output='screen', parameters=params('camera_scan_node'),
+        ))
+
+    if use_camera and use_depth:
+        # Depth image -> /depth_scan (floor rejected): boxes and low obstacles. Off by default,
+        # which also saves the Jetson's CPU.
+        actions.append(Node(
+            package='milestone4', executable='depth_scan_node', name='depth_scan_node',
+            output='screen', parameters=params('depth_scan_node'),
+        ))
+
+    # Fusion -------------------------------------------------------------------------------------
+
+    # /scan + /camera_box_scan + /depth_scan -> /fused_scan and /obstacle_scan.
+    actions.append(Node(
+        package='milestone4', executable='fusion_node', name='fusion_node', output='screen',
+        parameters=params('fusion_node', {'use_camera': use_camera, 'use_depth': use_depth}),
+        remappings=odom,
+    ))
+
+    # Planning and safety ------------------------------------------------------------------------
+
+    # Disparity extender on /fused_scan (raw /scan if fused stops) -> /drive_request.
+    # It shares the braking model with safety_node (the /** section of the YAML file).
+    actions.append(Node(
+        package='milestone4', executable='gap_follow_node', name='gap_follow_node',
+        output='screen', parameters=params('gap_follow_node'), remappings=odom,
+    ))
+
+    # Path-aware AEB with a variable TTC + watchdog: the only node publishing /drive.
+    actions.append(Node(
+        package='milestone4', executable='safety_node', name='safety_node', output='screen',
+        parameters=params('safety_node'), remappings=odom,
+    ))
+
+    # Camera + LiDAR + odometry lap counter -> latched stop after num_laps.
+    actions.append(Node(
+        package='milestone4', executable='lap_counter_node', name='lap_counter_node',
+        output='screen', parameters=params('lap_counter_node', {'use_camera': use_camera}),
+        remappings=odom,
+    ))
+
+    return actions
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -41,52 +208,13 @@ def generate_launch_description() -> LaunchDescription:
     Returns:
         LaunchDescription: Launch arguments and the Milestone 4 nodes.
     """
-    use_camera = LaunchConfiguration('use_camera')
-    odom_topic = LaunchConfiguration('odom_topic')
-
     args = [
-        # Driving
-        DeclareLaunchArgument('max_speed', default_value='1.0',
-                              description='Highest speed on a clear straight (m/s).'),
-        DeclareLaunchArgument('pass_speed', default_value='0.55',
-                              description='Speed cap while passing a camera-confirmed box (m/s).'),
-        DeclareLaunchArgument('lookahead', default_value='2.0',
-                              description='Longest pure-pursuit distance (m).'),
-        DeclareLaunchArgument('gain', default_value='1.0',
-                              description='Pure-pursuit steering gain.'),
-        DeclareLaunchArgument('a_lat', default_value='2.5',
-                              description='Sideways grip for the cornering speed (m/s^2).'),
-        DeclareLaunchArgument('margin', default_value='0.20',
-                              description='Clearance kept at obstacle and barrier edges (m).'),
-        DeclareLaunchArgument('smoothing', default_value='0.6',
-                              description='Weight of the previous steering command (0-1).'),
-        DeclareLaunchArgument('deep_fraction', default_value='0.95',
-                              description='Beams this close to the deepest count as the gap; '
-                                          'lower aims further from inner walls but can aim at '
-                                          'a near obstacle when the view ahead is short (0-1).'),
-        DeclareLaunchArgument('lidar_x', default_value='0.27',
-                              description='LiDAR distance ahead of the rear axle, for pure '
-                                          'pursuit (m); 0 treats the LiDAR as the rear axle.'),
-        # Safety
-        DeclareLaunchArgument('ttc_margin', default_value='0.1',
-                              description='Extra time added to the variable TTC threshold (s).'),
-        DeclareLaunchArgument('a_brake', default_value='2.0',
-                              description='Measured braking deceleration (m/s^2).'),
-        DeclareLaunchArgument('stop_margin', default_value='0.25',
-                              description='Gap AEB leaves in front of the LiDAR (m).'),
-        DeclareLaunchArgument('track_obstacles', default_value='false',
-                              description='true: AEB also uses obstacle speeds (moving ones).'),
-        # Lap counter
-        DeclareLaunchArgument('num_laps', default_value='3',
-                              description='Laps before the latched stop.'),
-        DeclareLaunchArgument('similarity_threshold', default_value='0.8',
-                              description='Lap score meaning "back at the start".'),
-        DeclareLaunchArgument('rearm_threshold', default_value='0.5',
-                              description='Lap score must drop below this before the next lap.'),
-        DeclareLaunchArgument('min_lap_distance', default_value='15.0',
-                              description='Shortest possible lap (m); about 3/4 of a lap '
-                                          '(15.0 for a 20 m lap).'),
-        # Sensors
+        DeclareLaunchArgument(
+            'params_file',
+            default_value=PathJoinSubstitution([FindPackageShare('milestone4'), 'config',
+                                                'milestone4.yaml']),
+            description='Parameter file for all nodes.'),
+        # Sensor switches: these choose which nodes start, so they keep real defaults here.
         DeclareLaunchArgument('use_camera', default_value='true',
                               description='false: LiDAR only (camera nodes not started).'),
         DeclareLaunchArgument('use_depth', default_value='false',
@@ -96,103 +224,9 @@ def generate_launch_description() -> LaunchDescription:
                               description='true: also start the RealSense driver.'),
         DeclareLaunchArgument('odom_topic', default_value='/odom',
                               description='Odometry topic (/ego_racecar/odom in the sim).'),
-        DeclareLaunchArgument('cam_x', default_value='0.0',
-                              description='Camera position ahead of the LiDAR (m).'),
-        DeclareLaunchArgument('cam_yaw_deg', default_value='0.0',
-                              description='Camera heading relative to the LiDAR (degrees).'),
     ]
+    args += [DeclareLaunchArgument(name, default_value='',
+                                   description=f'{text} Default: params_file.')
+             for name, text, _ in TUNING_ARGS]
 
-    # Sensors ------------------------------------------------------------------------------------
-
-    # RealSense driver (Vision intro, slide 6), only if start_camera:=true.
-    realsense = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([FindPackageShare('realsense2_camera'),
-                                  'launch', 'rs_launch.py'])),
-        launch_arguments={'enable_color': 'true', 'enable_depth': 'true'}.items(),
-        condition=IfCondition(PythonExpression([
-            "'", LaunchConfiguration('start_camera'), "' == 'true' and '", use_camera,
-            "' == 'true'"])),
-    )
-
-    # Colour image -> /camera_scan (walls + boxes) and /camera_box_scan (boxes only).
-    # Track walls are matte black, which absorbs infrared, so walls are found by colour.
-    camera_scan_node = Node(
-        package='milestone4', executable='camera_scan_node', name='camera_scan_node',
-        output='screen',
-        parameters=[{'mount_height': 0.187, 'pitch_deg': -5.3, 'ignore_bottom_rows': 30}],
-        condition=IfCondition(use_camera),
-    )
-
-    # Depth image -> /depth_scan (floor rejected): boxes and low obstacles. Only started with
-    # use_depth:=true (and the camera on), which also saves the Jetson's CPU.
-    depth_scan_node = Node(
-        package='milestone4', executable='depth_scan_node', name='depth_scan_node',
-        output='screen',
-        parameters=[{'mount_height': 0.187, 'pitch_deg': -5.3}],
-        condition=IfCondition(PythonExpression([
-            "'", use_camera, "' == 'true' and '", LaunchConfiguration('use_depth'),
-            "' == 'true'"])),
-    )
-
-    # Fusion -------------------------------------------------------------------------------------
-
-    # /scan + /camera_box_scan + /depth_scan -> /fused_scan and /obstacle_scan.
-    fusion_node = Node(
-        package='milestone4', executable='fusion_node', name='fusion_node',
-        output='screen',
-        parameters=[{'use_camera': use_camera,
-                     'use_depth': LaunchConfiguration('use_depth'),
-                     'cam_x': as_float('cam_x'),
-                     'cam_yaw_deg': as_float('cam_yaw_deg')}],
-        remappings=[('ego_racecar/odom', odom_topic)],
-    )
-
-    # Planning and safety ------------------------------------------------------------------------
-
-    # Disparity extender on /fused_scan (raw /scan if fused stops) -> /drive_request.
-    # It shares the braking model (a_brake, ttc_margin, stop_margin) with safety_node.
-    gap_follow_node = Node(
-        package='milestone4', executable='gap_follow_node', name='gap_follow_node',
-        output='screen',
-        parameters=[{'max_speed': as_float('max_speed'),
-                     'pass_speed': as_float('pass_speed'),
-                     'lookahead': as_float('lookahead'),
-                     'gain': as_float('gain'),
-                     'a_lat': as_float('a_lat'),
-                     'margin': as_float('margin'),
-                     'smoothing': as_float('smoothing'),
-                     'deep_fraction': as_float('deep_fraction'),
-                     'lidar_x': as_float('lidar_x'),
-                     'a_brake': as_float('a_brake'),
-                     'ttc_margin': as_float('ttc_margin'),
-                     'stop_margin': as_float('stop_margin')}],
-        remappings=[('ego_racecar/odom', odom_topic)],
-    )
-
-    # Path-aware AEB with a variable TTC + watchdog: the only node publishing /drive.
-    safety_node = Node(
-        package='milestone4', executable='safety_node', name='safety_node',
-        output='screen',
-        parameters=[{'drive_speed': as_float('max_speed'),
-                     'ttc_margin': as_float('ttc_margin'),
-                     'a_brake': as_float('a_brake'),
-                     'stop_margin': as_float('stop_margin'),
-                     'track_obstacles': LaunchConfiguration('track_obstacles')}],
-        remappings=[('ego_racecar/odom', odom_topic)],
-    )
-
-    # Camera + LiDAR + odometry lap counter -> latched stop after num_laps.
-    lap_counter_node = Node(
-        package='milestone4', executable='lap_counter_node', name='lap_counter_node',
-        output='screen',
-        parameters=[{'num_laps': LaunchConfiguration('num_laps'),
-                     'use_camera': use_camera,
-                     'similarity_threshold': as_float('similarity_threshold'),
-                     'rearm_threshold': as_float('rearm_threshold'),
-                     'min_lap_distance': as_float('min_lap_distance')}],
-        remappings=[('ego_racecar/odom', odom_topic)],
-    )
-
-    return LaunchDescription(args + [realsense, camera_scan_node, depth_scan_node, fusion_node,
-                                     gap_follow_node, safety_node, lap_counter_node])
+    return LaunchDescription(args + [OpaqueFunction(function=launch_nodes)])

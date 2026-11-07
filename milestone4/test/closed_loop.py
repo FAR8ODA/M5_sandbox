@@ -66,6 +66,18 @@ def box(cx, cy, size=0.4, step=0.005):
     return np.vstack(sides)
 
 
+def blocking_boxes(radius=2.0, x=0.0):
+    """
+    Return two boxes side by side across the middle of the far straight (halfway round).
+
+    The far straight's centreline is at y = 2 * radius. The boxes cover 0.8 m of the lane's
+    middle, leaving gaps of 0.2 m each side on a 1.2 m lane: too narrow for the 0.3 m car,
+    so it must stop in front of them.
+    """
+    centre = 2.0 * radius
+    return np.vstack([box(x, centre - 0.2), box(x, centre + 0.2)])
+
+
 def depth_scan(points, x, y, yaw, t, fov=math.radians(87.0), beams=90, range_max=2.5):
     """
     Return the simulated depth camera LaserScan of points seen from a car pose.

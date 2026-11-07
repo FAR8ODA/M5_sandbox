@@ -151,20 +151,22 @@ A lap counts at the peak of the score, only after the score has dropped in a cor
 
 ## Testing
 
-- **Unit and closed-loop tests** (`milestone4/test/`, 126 tests): the nodes' callbacks are called directly, with `test/ros_stubs.py` standing in for rclpy and the message types, so no ROS install is needed.
+- **Unit and closed-loop tests** (`milestone4/test/`, 134 tests): the nodes' callbacks are called directly, with `test/ros_stubs.py` standing in for rclpy and the message types, so no ROS install is needed.
 
   ```bash
   cd milestone4/test
-  python3 -m unittest test_braking test_fusion test_gap_follow test_safety test_lap_counter test_perception test_closed_loop
+  python3 -m unittest test_braking test_fusion test_gap_follow test_safety test_lap_counter test_perception test_closed_loop test_params
   ```
 
   On the car or VM, `colcon test --packages-select milestone4 && colcon test-result --verbose` runs these plus the style checks.
 
   - Unit tests: the braking model, fusion rules, disparity extender, AEB cases and lap counting.
+  - Parameter file (`test_params.py`): every value in `config/milestone4.yaml` is a parameter its node declares, with the right type, so a typo cannot be silently ignored.
   - Closed-loop simulation (`test/closed_loop.py`, also runnable on its own): all nodes together on a ray-cast track, covering:
     - 3-lap runs at 1.0 and 1.5 m/s;
     - boxes;
     - a box pushed at the car;
+    - the lane blocked halfway round by two boxes side by side (gaps narrower than the car): the car stops in front of them and stays stopped;
     - LiDAR dropouts and scan lag;
     - a realistic car (steering delay and error, odometry and range noise) on 1.0–1.2 m tracks without false AEB.
 - **Style**: flake8, pep257 and copyright checks, run by `colcon test`.
@@ -177,14 +179,20 @@ A lap counts at the peak of the score, only after the score has dropped in a cor
 
 ## Tuning on the Track
 
+Try a value with a launch argument (`a_brake:=2.4`), then write it into `config/milestone4.yaml` and rebuild so it sticks.
+
 1. **Camera alignment**: overlay `/scan` and `/camera_scan` in rviz; adjust `cam_x` / `cam_yaw_deg` until the walls line up.
 2. **Braking**: let AEB stop the car from a known speed v, measure the stopping distance d, and set `a_brake = v² / (2d)`.
 3. **Speed**: raise `max_speed` 1.0 → 1.25 → 1.5, watching `/safety/state` for unwanted `slow` or `aeb`; then tune `a_lat`.
 4. **Lap distance**: read the lap length from the `Lap 1 (... m driven)` log and set `min_lap_distance` to about ¾ of it.
 
-## Launch Arguments
+## Parameters and Launch Arguments
 
-| Argument | Default | Description |
+Every parameter of every node is in **`milestone4/config/milestone4.yaml`**, the single place to tune the car. Values shared by several nodes (car geometry, the braking model, timeouts, camera mounting) sit once in its `/**` section, so the planner and the safety node can never use different braking models. Keep the decimal point on decimal values (`1.0`, not `1`): ROS parameters are typed.
+
+Launch arguments override the file for one run, e.g. `max_speed:=1.25`. Tuning arguments not given on the command line leave the file's value. Use `params_file:=/path/to/copy.yaml` to launch with a different file.
+
+| Argument | File value | Description |
 |---|---|---|
 | `max_speed` | 1.0 | Top speed, also the safety node's cap (m/s) |
 | `pass_speed` | 0.55 | Speed while passing a confirmed box (m/s) |
@@ -197,8 +205,9 @@ A lap counts at the peak of the score, only after the score has dropped in a cor
 | `track_obstacles` | false | Use obstacle speeds in AEB |
 | `num_laps` / `min_lap_distance` | 3 / 15.0 | Laps before stopping; shortest lap (m) |
 | `similarity_threshold` / `rearm_threshold` | 0.8 / 0.5 | Lap counter thresholds |
-| `use_camera` / `use_depth` / `start_camera` | true / false / false | Camera fusion, depth fusion, start the RealSense driver |
-| `odom_topic` | /odom | `/ego_racecar/odom` in the simulator |
+| `use_camera` / `use_depth` / `start_camera` | true / false / false | Camera fusion, depth fusion, start the RealSense driver (launch defaults: they choose which nodes start) |
+| `odom_topic` | /odom | `/ego_racecar/odom` in the simulator (launch default) |
+| `params_file` | `config/milestone4.yaml` | Parameter file for all nodes |
 | `cam_x` / `cam_yaw_deg` | 0.0 / 0.0 | Camera offset from the LiDAR (m, degrees) |
 
 ## Dependencies

@@ -84,7 +84,7 @@ class GapFollowNode(Node):
         """Initialize parameters, state, subscribers and publisher."""
         super().__init__('gap_follow_node')
 
-        # Launch parameters (set in milestone4_py.py):
+        # Main tuning parameters (values in config/milestone4.yaml):
         self.declare_parameter('max_speed', 1.0)
         self.declare_parameter('min_speed', 0.35)
         self.declare_parameter('pass_speed', 0.55)
@@ -122,7 +122,7 @@ class GapFollowNode(Node):
         self.declare_parameter('a_accel', 2.0)
         self.declare_parameter('plan_factor', 2.5)
 
-        # Braking model, shared with safety_node (the launch file sets both the same):
+        # Braking model, shared with safety_node (the /** section of config/milestone4.yaml):
         self.declare_parameter('a_brake', 2.0)
         self.declare_parameter('t_react', 0.15)
         self.declare_parameter('ttc_margin', 0.1)

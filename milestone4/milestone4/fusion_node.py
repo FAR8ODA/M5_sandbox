@@ -53,7 +53,7 @@ class FusionNode(Node):
         """Declare parameters and create the fuser, subscriptions and publishers."""
         super().__init__('fusion_node')
 
-        # Launch parameters (set in milestone4_py.py):
+        # Main tuning parameters (values in config/milestone4.yaml):
         self.declare_parameter('use_camera', True)       # False: LiDAR passes straight through
         self.declare_parameter('use_depth', False)       # also fuse the depth scan
         self.declare_parameter('camera_timeout', 0.2)    # older camera scans are ignored (s)
