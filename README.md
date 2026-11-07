@@ -6,14 +6,18 @@ The car laps the track at 1.0–1.5 m/s, avoids static and moving obstacles, and
 
 Run each command in its own terminal on the car:
 
-```bash
-# 1. car stack (LiDAR, VESC, odometry)
+1. Car stack (LiDAR, VESC, odometry)
+```
 source ~/f1tenth_ws/install/setup.bash && ros2 launch f1tenth_stack bringup_launch.py
+```
 
-# 2. camera
+2. Camera
+```
 source ~/f1tenth_ws/install/setup.bash && ros2 launch realsense2_camera rs_launch.py
+```
 
-# 3. build and run Milestone 4
+3. Build and run Milestone 4
+```
 cd ~/f1tenth_ws && colcon build --packages-select milestone4 && source install/setup.bash \
   && ros2 launch milestone4 milestone4_py.py num_laps:=3 min_lap_distance:=15.0
 ```
