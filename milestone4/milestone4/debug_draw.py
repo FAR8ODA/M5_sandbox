@@ -13,10 +13,9 @@ scan seen from above, car at the bottom centre, forward up.
 import math
 
 import cv2
+from milestone4.boundary import ScanResult
+from milestone4.camera_model import CameraModel
 import numpy as np
-
-from milestone4.perception.boundary import ScanResult
-from milestone4.perception.camera_model import CameraModel
 
 
 def draw_debug(bgr: np.ndarray, result: ScanResult, cam: CameraModel,

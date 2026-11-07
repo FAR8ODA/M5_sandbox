@@ -1,5 +1,5 @@
-import os
 from glob import glob
+import os
 
 from setuptools import find_packages, setup
 
@@ -34,18 +34,19 @@ setup(
     maintainer='Team B4',
     maintainer_email='team@example.com',
 
-    description='CPEN 391 Milestone 4',
+    description='CPEN 391 Milestone 4: LiDAR-camera fusion, disparity extender, path-aware AEB',
 
     license='MIT',
 
+    tests_require=['pytest'],
+
     entry_points={
         'console_scripts': [
-            'safety_node = milestone4.safety_node:main',
-            'wall_follow_node = milestone4.wall_follow_node:main',
-            'gap_follow_node = milestone4.gap_follow_node:main',
-            'depth_scan_node = milestone4.depth_scan_node:main',
             'camera_scan_node = milestone4.camera_scan_node:main',
-            'lane_follow_node = milestone4.lane_follow_node:main',
+            'depth_scan_node = milestone4.depth_scan_node:main',
+            'fusion_node = milestone4.fusion_node:main',
+            'gap_follow_node = milestone4.gap_follow_node:main',
+            'safety_node = milestone4.safety_node:main',
             'lap_counter_node = milestone4.lap_counter_node:main',
         ],
     },

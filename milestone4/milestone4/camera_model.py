@@ -18,8 +18,8 @@ Bearing = atan2(-lateral, forward), so left is positive, as in ROS LaserScan.
 Pitch is positive when the camera is tilted down.
 """
 
-import math
 from dataclasses import dataclass
+import math
 from typing import Sequence, Tuple
 
 import numpy as np
