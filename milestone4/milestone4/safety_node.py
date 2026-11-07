@@ -4,11 +4,16 @@ TTC-based safety node for the F1Tenth vehicle.
 The wall-following node requests steering only. This node owns vehicle
 speed and is the only node that publishes commands to /drive.
 
-Safety features for Milestone 4:
+Safety features:
 
+    LiDAR AEB (Milestone 4): TTC is computed from the LiDAR scan (/scan) by
+    default. The track walls are matte black ducting, which absorbs the depth
+    camera's infrared light, so the Milestone 3 depth-based AEB could not see
+    them; the LiDAR does, and covers 270 degrees instead of the camera's ~87.
+    The launch argument aeb_scan_topic:=depth_scan restores depth-based AEB.
     Odom Sign Fix: If the car’s odometry reads negative while moving forward,
     TTC math breaks, so added abs() in TTC calculation.
-    Watchdog: If no steering command arrives for 0.25 s, the car stops gracefully.
+    Watchdog: If no steering command or scan arrives for 0.25 s, the car stops gracefully.
     Lap Counter Stop: A message with negative speed on drive_request stops the car
 
 """
@@ -21,6 +26,7 @@ import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 
 from sensor_msgs.msg import LaserScan
@@ -55,8 +61,10 @@ class SafetyNode(Node):
         self.drive_speed = float(self.get_parameter('drive_speed').value)
         self.stale_timeout = float(self.get_parameter('stale_timeout').value)
 
-        # Wall stop: latched stop when the depth scan shows one continuous object wider than
-        # wall_width within wall_distance ahead (a cardboard wall across the lane). 
+        # Wall stop: latched stop when the scan shows one continuous object wider than
+        # wall_width within wall_distance ahead (a cardboard wall across the lane).
+        # Designed for the depth scan, which cannot see the black track walls. On the
+        # LiDAR scan the outer wall of every corner matches, so keep it off with LiDAR AEB.
         self.declare_parameter('wall_stop', False)
         self.declare_parameter('wall_distance', 0.7)    # m ahead (the floor in the depth band is farther)
         self.declare_parameter('wall_width', 0.6)       # m, wider than one box (0.5 m), narrower than the lane
@@ -82,12 +90,14 @@ class SafetyNode(Node):
         )
 
         # create a subscriber to detect obstacles and calculate TTC.
-        # Remapped to depth_scan (vision AEB) or /scan (LiDAR fallback) by the launch file.
+        # Remapped by the launch file to /scan (LiDAR, default) or depth_scan.
+        # Sensor-data QoS (best effort) receives from both reliable and
+        # best-effort publishers, so it works with any LiDAR driver setting.
         self.scan_subscription = self.create_subscription(
             LaserScan,
             'scan',
             self.scan_callback,
-            10
+            qos_profile_sensor_data
         )
 
         # create a subscriber to get current forward speed
@@ -261,7 +271,7 @@ class SafetyNode(Node):
         if self.get_parameter('wall_stop').value and self.safety_mode != 'aeb':
             self.wall_frames = self.wall_frames + 1 if self.wall_ahead(msg) else 0
             if self.wall_frames >= 2:
-                self.get_logger().warn('Wall ahead (depth scan): latched stop')
+                self.get_logger().warn('Wall ahead (scan): latched stop')
                 self.safety_mode = 'aeb'
                 self.emergency_brake()
 

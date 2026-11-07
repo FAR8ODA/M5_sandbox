@@ -23,6 +23,9 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('driver', default_value='gap'),
         DeclareLaunchArgument('drive_speed', default_value='0.7'),
         DeclareLaunchArgument('ttc_threshold', default_value='0.65'),
+        # Scan used for AEB: the LiDAR by default (sees the black walls the depth
+        # camera misses); 'depth_scan' brings back the Milestone 3 depth-based AEB.
+        DeclareLaunchArgument('aeb_scan_topic', default_value='/scan'),
         DeclareLaunchArgument('lookahead', default_value='1.0'),
         DeclareLaunchArgument('gain', default_value='1.5'),
         DeclareLaunchArgument('similarity_threshold', default_value='0.8'),
@@ -59,7 +62,7 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{'mount_height': 0.187, 'pitch_deg': -5.3, 'ignore_bottom_rows': 30}],
     )
 
-    # Depth image -> LaserScan (used for emergency braking AEB)
+    # Depth image -> LaserScan (AEB with aeb_scan_topic:=depth_scan; LiDAR by default)
     depth_scan_node = Node(
         package='milestone4', executable='depth_scan_node', name='depth_scan_node',
         output='screen',
@@ -70,12 +73,14 @@ def generate_launch_description() -> LaunchDescription:
 
     # Milestone 4 Safety (AEB + watchdog)
     # forwards drive_request to /drive at a capped speed.
+    # AEB runs on the LiDAR scan (/scan) by default, see aeb_scan_topic.
     safety_node = Node(
         package='milestone4', executable='safety_node', name='safety_node',
         output='screen',
         parameters=[{'drive_speed': drive_speed,
                      'ttc_threshold': LaunchConfiguration('ttc_threshold')}],
-        remappings=[('scan', 'depth_scan'), ('ego_racecar/odom', '/odom')],
+        remappings=[('scan', LaunchConfiguration('aeb_scan_topic')),
+                    ('ego_racecar/odom', '/odom')],
     )
 
     # Milestone 4: Lane-Follow on the camera scan.
