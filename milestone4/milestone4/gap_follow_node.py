@@ -11,7 +11,9 @@ The algorithm (Gap Following lecture, FTG Tweaks 2-4):
        camera-confirmed boxes get a wider margin (BOX_MARGIN). Missing returns (black
        barriers often give none at their edges) are skipped, so they cannot hide an edge
     c. aim for the centre of the deepest run of beams (Tweak 4)
-    d. steer to that point with pure pursuit (as in Milestone 3)
+    d. steer to that point with pure pursuit (as in Milestone 3), measured from the rear
+       axle: the LiDAR sits lidar_x ahead of it, and treating the LiDAR as the rear axle
+       made every turn too sharp, which also pulled the car towards inner walls
     e. if something is right beside the car on the side it is turning towards,
        go straight instead (Tweak 3: disparity extender cornering)
     f. choose the speed from physics (variable speed), the lowest of:
@@ -96,10 +98,15 @@ class GapFollowNode(Node):
         self.declare_parameter('car_half_width', 0.15)
         self.declare_parameter('margin', 0.20)
         self.declare_parameter('box_margin', 0.25)
+        # 0.95 aims at the sliver of beams just past an inner corner, so the car rides about
+        # half the car plus margin from the inner wall. Lower values (0.7) move it 6-7 cm out in
+        # the closed-loop simulator, but when the view ahead is short they also count a nearby
+        # obstacle as "deep" and aim at it (test_target_avoids_a_box_on_the_right), so 0.95 stays
         self.declare_parameter('deep_fraction', 0.95)
         self.declare_parameter('min_gap_range', 0.4)
 
         # Steering parameters:
+        self.declare_parameter('lidar_x', 0.27)
         self.declare_parameter('min_lookahead', 0.5)
         self.declare_parameter('lookahead_time', 0.8)
         self.declare_parameter('wheelbase', 0.33)
@@ -139,6 +146,7 @@ class GapFollowNode(Node):
         self.BOX_MARGIN = float(p('box_margin').value)       # clearance at a confirmed box (m)
         self.DEEP_FRACTION = float(p('deep_fraction').value)  # near-deepest beams count too
         self.MIN_GAP_RANGE = float(p('min_gap_range').value)  # shallower deepest: no gap (m)
+        self.LIDAR_X = float(p('lidar_x').value)             # LiDAR ahead of the rear axle (m)
 
         # Steering parameters:
 
@@ -419,10 +427,16 @@ class GapFollowNode(Node):
         Returns:
             steering_angle: steering angle in radians (positive is left)
         """
-        # pure pursuit: curvature 2 sin(alpha) / ld (Coulter 1992), as in Milestone 3
+        # goal point: ld along the target beam, from the LiDAR
         ld = min(distance, self.LOOKAHEAD_TIME * self.lookahead_speed(), self.LOOKAHEAD)
         ld = max(ld, self.MIN_LOOKAHEAD)
-        steering = math.atan(2.0 * self.WHEELBASE * math.sin(angle) / ld) * self.STEERING_GAIN
+
+        # pure pursuit: curvature 2 y / L^2 (Coulter 1992), as in Milestone 3, but from the
+        # rear axle, which the car turns about; the LiDAR is LIDAR_X ahead of it
+        gx = ld * math.cos(angle) + self.LIDAR_X
+        gy = ld * math.sin(angle)
+        curvature = 2.0 * gy / (gx * gx + gy * gy)
+        steering = math.atan(self.WHEELBASE * curvature) * self.STEERING_GAIN
 
         # clamp to the car's steering range
         steering = max(-self.MAX_STEERING, min(self.MAX_STEERING, steering))

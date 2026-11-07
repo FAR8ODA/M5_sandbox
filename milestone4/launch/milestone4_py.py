@@ -60,6 +60,13 @@ def generate_launch_description() -> LaunchDescription:
                               description='Clearance kept at obstacle and barrier edges (m).'),
         DeclareLaunchArgument('smoothing', default_value='0.6',
                               description='Weight of the previous steering command (0-1).'),
+        DeclareLaunchArgument('deep_fraction', default_value='0.95',
+                              description='Beams this close to the deepest count as the gap; '
+                                          'lower aims further from inner walls but can aim at '
+                                          'a near obstacle when the view ahead is short (0-1).'),
+        DeclareLaunchArgument('lidar_x', default_value='0.27',
+                              description='LiDAR distance ahead of the rear axle, for pure '
+                                          'pursuit (m); 0 treats the LiDAR as the rear axle.'),
         # Safety
         DeclareLaunchArgument('ttc_margin', default_value='0.1',
                               description='Extra time added to the variable TTC threshold (s).'),
@@ -155,6 +162,8 @@ def generate_launch_description() -> LaunchDescription:
                      'a_lat': as_float('a_lat'),
                      'margin': as_float('margin'),
                      'smoothing': as_float('smoothing'),
+                     'deep_fraction': as_float('deep_fraction'),
+                     'lidar_x': as_float('lidar_x'),
                      'a_brake': as_float('a_brake'),
                      'ttc_margin': as_float('ttc_margin'),
                      'stop_margin': as_float('stop_margin')}],

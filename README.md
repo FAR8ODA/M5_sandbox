@@ -92,7 +92,7 @@ The camera never moves a LiDAR range; it only labels points or adds persistent o
 ### Driving: disparity extender with variable speed
 
 - **Disparity extender** (gap-following lecture, tweaks 2–4): at every range jump > 0.3 m, the nearer range is extended over enough beams to cover half the car plus `margin` (0.20 m; 0.25 m at confirmed boxes). The car then aims for the centre of the deepest remaining run of beams.
-- **Pure pursuit** steering, with a lookahead that grows with the measured speed, smoothed and clamped to ±0.4 rad.
+- **Pure pursuit** steering from the rear axle (the LiDAR sits `lidar_x` = 0.27 m ahead of it), with a lookahead that grows with the measured speed, smoothed and clamped to ±0.4 rad. Treating the LiDAR as the rear axle turned every corner too sharply and made the car ride the inner wall.
 - **Variable speed**: the lowest of
   - `max_speed`;
   - a braking limit that keeps the TTC to the planned arc at 2.5 × the time needed to stop;
@@ -151,15 +151,23 @@ A lap counts at the peak of the score, only after the score has dropped in a cor
 
 ## Testing
 
-- **Unit and closed-loop tests** (developed in the team sandbox, run without ROS using stubbed rclpy):
+- **Unit and closed-loop tests** (`milestone4/test/`, 126 tests): the nodes' callbacks are called directly, with `test/ros_stubs.py` standing in for rclpy and the message types, so no ROS install is needed.
+
+  ```bash
+  cd milestone4/test
+  python3 -m unittest test_braking test_fusion test_gap_follow test_safety test_lap_counter test_perception test_closed_loop
+  ```
+
+  On the car or VM, `colcon test --packages-select milestone4 && colcon test-result --verbose` runs these plus the style checks.
+
   - Unit tests: the braking model, fusion rules, disparity extender, AEB cases and lap counting.
-  - Closed-loop simulation: all nodes together on a ray-cast track, covering:
+  - Closed-loop simulation (`test/closed_loop.py`, also runnable on its own): all nodes together on a ray-cast track, covering:
     - 3-lap runs at 1.0 and 1.5 m/s;
     - boxes;
     - a box pushed at the car;
     - LiDAR dropouts and scan lag;
     - a realistic car (steering delay and error, odometry and range noise) on 1.0–1.2 m tracks without false AEB.
-- **Style**: `colcon test --packages-select milestone4 && colcon test-result --verbose` (flake8, pep257, copyright).
+- **Style**: flake8, pep257 and copyright checks, run by `colcon test`.
 - **On the car**:
   1. Empty laps, then static boxes, raising `max_speed` in steps.
   2. A box on a straight and in a corner, to check AEB stops in time without firing falsely in corners.
@@ -183,6 +191,8 @@ A lap counts at the peak of the score, only after the score has dropped in a cor
 | `lookahead` / `gain` / `smoothing` | 2.0 / 1.0 / 0.6 | Pure pursuit distance (m), gain, steering smoothing |
 | `a_lat` | 2.5 | Cornering grip (m/s²) |
 | `margin` | 0.20 | Clearance beyond half the car at edges (m) |
+| `lidar_x` | 0.27 | LiDAR distance ahead of the rear axle; pure pursuit steers from the rear axle (0 = old behaviour, turns too sharply and rides inner walls) |
+| `deep_fraction` | 0.95 | Beams this close to the deepest count as the gap; lower aims further from inner walls but can aim at a near obstacle |
 | `a_brake` / `ttc_margin` / `stop_margin` | 2.0 / 0.1 / 0.25 | Braking model (m/s², s, m) |
 | `track_obstacles` | false | Use obstacle speeds in AEB |
 | `num_laps` / `min_lap_distance` | 3 / 15.0 | Laps before stopping; shortest lap (m) |
