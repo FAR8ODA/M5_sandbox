@@ -22,6 +22,7 @@ from milestone4.lap_counter_node import LapCounterNode  # noqa: I100
 from milestone4.safety_node import SafetyNode  # noqa: I100
 
 WHEELBASE = 0.33
+CAR_HALF_WIDTH = 0.15            # half the car's width (m), for body_clearance
 STEP = 0.025                  # LiDAR period (s)
 
 # A car as it really is, with its steering servo calibrated (it turns the commanded angle):
@@ -37,7 +38,7 @@ REALISTIC_CAR = {'servo_lag': 0.1, 'steer_gain': 1.0, 'steer_offset': 0.0,
 UNCALIBRATED_CAR = dict(REALISTIC_CAR, steer_gain=0.8, steer_offset=0.03)
 
 
-def stadium_track(straight=6.0, radius=2.0, half_lane=0.6, step=0.005):
+def stadium_track(straight=6.0, radius=2.0, half_lane=0.6, step=ros_stubs.WALL_STEP):
     """
     Return dense wall points of a stadium track and the length of its centreline.
 
@@ -58,7 +59,7 @@ def stadium_track(straight=6.0, radius=2.0, half_lane=0.6, step=0.005):
     return world, 2.0 * straight + 2.0 * math.pi * radius
 
 
-def box(cx, cy, size=0.4, step=0.005):
+def box(cx, cy, size=0.4, step=ros_stubs.WALL_STEP):
     """Return dense points around a square box centred at (cx, cy)."""
     h = size / 2.0
     corners = [(cx - h, cy - h), (cx + h, cy - h), (cx + h, cy + h), (cx - h, cy + h)]
@@ -124,7 +125,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
         servo_lag=0.0, box_centres=None, label_probability=1.0, seed=1, scan_lag=None,
         steer_gain=1.0, steer_offset=0.0, lidar_offset=0.0, range_noise=0.0,
         steer_delay=0.0, odom_noise=0.0, track_obstacles=None, margin=None, smoothing=None,
-        planner=None):
+        planner=None, car_brake=None, drive_delay=0.0, lidar_to_bumper=0.15):
     """
     Drive the nodes around a world until the lap counter stops the car (or max_time).
 
@@ -153,9 +154,16 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
             the gap follower's margin and smoothing; None keeps the node defaults.
         planner: Other gap_follow_node parameters to override, e.g.
             {'lidar_x': 0.0} for pure pursuit from the LiDAR.
+        car_brake: How hard the simulated car really brakes (m/s^2); None = a_brake, the
+            value the safety node assumes. Lower it to test a braking model that is wrong.
+        drive_delay: Time from a /drive command to the motor acting on it (s): VESC and
+            motor latency the nodes do not know about.
+        lidar_to_bumper: Front bumper this far ahead of the LiDAR (m), for body_clearance.
 
     Returns:
         dict: laps, safety mode, time, distance, closest wall distance, top speed, trace,
+        body_clearance (smallest gap between the car's body rectangle and anything, m;
+        <= 0 is a crash), the speed at that moment (body_clearance_speed),
         the largest persistent obstacle speed the safety node saw, and the steering jitter
         (mean change of the steering command per scan while moving, rad).
     """
@@ -191,6 +199,9 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
     noise = np.random.default_rng(seed)
     late = []                                              # scans on their way to safety
     pending = []                                           # steering on its way to the servo
+    speeds = []                                            # speed on its way to the motor
+    brake = a_brake if car_brake is None else car_brake
+    body_clearance, body_clearance_speed = math.inf, 0.0
     jitter, last_steer = [], None
     obstacle_peak = 0.0                                    # largest persistent obstacle speed
     distance, closest, top_speed, trace = 0.0, math.inf, 0.0, []
@@ -255,10 +266,11 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
 
         # the car follows /drive
         command = last(safety, 'drive')
-        target = command.drive.speed if command else 0.0
+        speeds.append(command.drive.speed if command else 0.0)
+        target = speeds.pop(0) if len(speeds) > int(round(drive_delay / STEP)) else 0.0
         steer = command.drive.steering_angle if command else 0.0
         dv = target - v
-        v += max(-a_brake * STEP, min(accel * STEP, dv))
+        v += max(-brake * STEP, min(accel * STEP, dv))
         x += v * STEP * math.cos(yaw)
         y += v * STEP * math.sin(yaw)
         pending.append(steer)
@@ -279,6 +291,16 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
             cy = y + (lidar_offset - back) * math.sin(yaw)
             closest = min(closest, float(np.min(np.hypot(solid[:, 0] - cx,
                                                          solid[:, 1] - cy))))
+        # body clearance: the car as a rectangle, 0.05 m behind the rear axle to the bumper
+        dx, dy = solid[:, 0] - x, solid[:, 1] - y
+        ahead = dx * math.cos(yaw) + dy * math.sin(yaw)
+        left = -dx * math.sin(yaw) + dy * math.cos(yaw)
+        out_x = np.maximum(np.maximum(-0.05 - ahead, ahead - (lidar_offset + lidar_to_bumper)), 0.0)
+        out_y = np.maximum(np.abs(left) - CAR_HALF_WIDTH, 0.0)
+        inside = (out_x == 0.0) & (out_y == 0.0)
+        gap = float(np.min(np.where(inside, -1.0, np.hypot(out_x, out_y))))
+        if gap < body_clearance:
+            body_clearance, body_clearance_speed = gap, v
         trace.append((t, x, y, v, safety.safety_mode, laps.laps))
 
         if laps.done and v < 0.01:
@@ -289,6 +311,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
             'obstacle_peak': obstacle_peak,
             'steer_jitter': float(np.mean(jitter)) if jitter else 0.0,
             'closest': closest, 'top_speed': top_speed, 'trace': trace,
+            'body_clearance': body_clearance, 'body_clearance_speed': body_clearance_speed,
             'logs': {name: node.get_logger().records for name, node in
                      (('fusion', fusion), ('planner', planner), ('safety', safety),
                       ('laps', laps))}}

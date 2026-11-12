@@ -58,7 +58,8 @@ from std_msgs.msg import Float32, Int32
 # [ Step 3 ] count laps
 # reference: average the first REFERENCE_TIME seconds into the starting view
 # blind: ignore everything for BLIND_TIME seconds
-# search: once the score drops below REARM_THRESHOLD (the car has left the start),
+# search: once the score drops below REARM_THRESHOLD or the car has driven
+#         REARM_DISTANCE_FRACTION of the lap gate (either way, it has left the start),
 #         confirm a match when it stays at or above SIMILARITY_THRESHOLD for CONFIRM_TICKS
 #         ticks AND the car has driven far enough since the last lap, then count the lap
 #         at the score's peak (where the view matches best); then back to blind
@@ -99,6 +100,7 @@ class LapCounterNode(Node):
         self.declare_parameter('use_camera', True)
         self.declare_parameter('similarity_threshold', 0.8)
         self.declare_parameter('rearm_threshold', 0.5)
+        self.declare_parameter('rearm_distance_fraction', 0.5)
         self.declare_parameter('camera_weight', 0.5)
         self.declare_parameter('lidar_weight', 0.5)
         self.declare_parameter('min_lap_distance', 5.0)
@@ -128,6 +130,11 @@ class LapCounterNode(Node):
         self.USE_CAMERA = bool(p('use_camera').value)             # False: LiDAR signature only
         self.SIMILARITY_THRESHOLD = float(p('similarity_threshold').value)  # "back at the start"
         self.REARM_THRESHOLD = float(p('rearm_threshold').value)  # must drop below this first
+        # ... or the car must have driven this fraction of the lap gate. Between solid walls
+        # the LiDAR score never falls that low (0.64 at its lowest in the closed-loop
+        # simulator: every part of a walled loop looks a bit like the start), so with the
+        # score alone the counter never armed and no lap was ever counted
+        self.REARM_DISTANCE_FRACTION = float(p('rearm_distance_fraction').value)
         self.CAMERA_WEIGHT = max(0.0, float(p('camera_weight').value))
         self.LIDAR_WEIGHT = max(0.0, float(p('lidar_weight').value))
         self.MIN_LAP_DISTANCE = float(p('min_lap_distance').value)  # shortest possible lap (m)
@@ -165,6 +172,7 @@ class LapCounterNode(Node):
         self.blind_until = 0.0          # end of the current blind period (s)
         self.armed = False              # score has dropped since the last lap
         self.streak = 0                 # ticks in a row at or above the threshold
+        self.lookalike_logged = False   # this lap's look-alike view was already logged
         self.peak = None                # best score since the match was confirmed
         self.peak_since = 0.0           # when the match was confirmed (s)
         self.scores = (None, None, None)  # (combined, camera, lidar) of the last tick
@@ -405,6 +413,19 @@ class LapCounterNode(Node):
             return True
         return self.distance - self.lap_start_distance >= self.lap_gate()
 
+    def left_start(self) -> bool:
+        """
+        Check from odometry that the car has left the start since the last lap.
+
+        Returns:
+            bool: True once it has driven REARM_DISTANCE_FRACTION of the lap gate; always
+            False without odometry (the score drop is then the only way to arm).
+        """
+        if self.last_odom_time is None:
+            return False
+        driven = self.distance - self.lap_start_distance
+        return driven >= self.REARM_DISTANCE_FRACTION * self.lap_gate()
+
     def camera_reference_open(self, now: float) -> bool:
         """
         Check whether camera frames may still be added to the reference.
@@ -480,7 +501,7 @@ class LapCounterNode(Node):
 
         # search: first wait until the car has clearly left the start ...
         if not self.armed:
-            self.armed = score < self.REARM_THRESHOLD
+            self.armed = score < self.REARM_THRESHOLD or self.left_start()
             return False
 
         # ... then wait until the view matches the start for a few ticks in a row
@@ -491,9 +512,11 @@ class LapCounterNode(Node):
 
             # a match before the car has driven far enough is a look-alike spot, not the start
             if not self.distance_ok():
-                self.get_logger().info(
-                    f'start-like view after {self.distance - self.lap_start_distance:.1f} m '
-                    f'(< {self.lap_gate():.1f} m): not a lap', throttle_duration_sec=2.0)
+                if not self.lookalike_logged:             # once per lap: it can last a straight
+                    self.get_logger().info(
+                        f'start-like view after {self.distance - self.lap_start_distance:.1f} m '
+                        f'(< {self.lap_gate():.1f} m): not a lap')
+                    self.lookalike_logged = True
                 self.armed = False
                 self.streak = 0
                 return False
@@ -513,6 +536,7 @@ class LapCounterNode(Node):
 
         # lap counted: back to blind, so one pass over the start counts once
         self.peak = None
+        self.lookalike_logged = False
         self.laps += 1
         self.last_lap_length = self.distance - self.lap_start_distance
         if self.first_lap_distance is None and self.last_odom_time is not None:

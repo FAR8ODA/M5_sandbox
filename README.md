@@ -45,7 +45,8 @@ flowchart LR
     CAM -- "color image" --> CSN
     CAM -- "depth image" --> DSN
     CAM -- "color image" --> LAP
-    CSN -- "/camera_box_scan" --> FUS
+    CAM -- "color camera_info" --> FUS
+    CSN -- "/camera_box_mask" --> FUS
     DSN -- "/depth_scan" --> FUS
     LIDAR -- "/scan" --> FUS
     VESC -- "/odom" --> FUS
@@ -68,9 +69,9 @@ flowchart LR
 
 | Node | Role |
 |---|---|
-| `camera_scan_node` | Splits each colour frame into wall (black ducting) and box (cardboard) masks and projects them onto the floor as LaserScans. A box must stand on the floor, so tan furniture behind the barriers is not one. |
+| `camera_scan_node` | Splits each colour frame into wall (black ducting) and box (cardboard) masks. Publishes the box mask as `/camera_box_mask` for fusion. While someone views them (rviz), it also projects the masks onto the floor as the LaserScans `/camera_scan` and `/camera_box_scan`. |
 | `depth_scan_node` | Turns the depth image into a scan, dropping floor pixels by their height. Off by default. |
-| `fusion_node` | Combines the camera scans with each LiDAR scan (rules below). Publishes `/fused_scan` (same geometry as `/scan`) and `/obstacle_scan` (confirmed boxes). |
+| `fusion_node` | Projects every LiDAR return into the box mask to label boxes, and adds depth-only objects (rules below). Publishes `/fused_scan` (same geometry as `/scan`) and `/obstacle_scan` (confirmed boxes). |
 | `gap_follow_node` | Disparity extender with pure pursuit and a variable speed. Sends `/drive_request`. |
 | `safety_node` | Path-aware AEB with a variable TTC, a soft speed cap, a watchdog and latched stops. Publishes `/drive`. |
 | `lap_counter_node` | Counts laps from camera + LiDAR similarity to the start, gated by odometry distance; requests a latched stop after `num_laps`. |
@@ -81,13 +82,16 @@ Helper modules (no ROS code): `braking.py` (shared braking model), `fusion.py`, 
 
 ### Fusion: LiDAR for geometry, camera for labels
 
-Camera points are moved into the LiDAR frame (`cam_x`, `cam_yaw_deg`, plus the distance the car drove since the frame was taken) and matched to LiDAR beams.
+**Box labels: the LiDAR gives the range, the camera gives the class.** Every LiDAR return is projected to its pixel in the camera's box mask, using the camera intrinsics, its mounting (`cam_x`, `cam_yaw_deg`, `cam_z`, `pitch_deg`) and the distance the car drove since the frame was taken. A short strip of rows around that pixel is checked (±`label_strip_deg`); if at least `label_fraction` of it is cardboard, the beam is a confirmed box.
+
+The first version matched ranges instead: the camera's floor distance to a box had to be within 0.25 m of the LiDAR's. From a camera 0.187 m above the floor, one degree of pitch (braking, a bump) moves a box at 2 m by about 0.4 m, so the labels dropped out exactly when the car slowed for a box. A pixel hardly moves with pitch, so the projected labels hold up to about 3° of pitch error and do not need `cam_z` to be exact: with the default, they hold for a camera anywhere from 15 to 22 cm above the floor (`test_a_degree_of_pitch_does_not_lose_the_label`, `test_camera_anywhere_from_15_to_22_cm_above_the_floor`).
 
 | Camera sees | LiDAR at that bearing | Result |
 |---|---|---|
-| Box colour, within 0.25 m of a LiDAR return | sees it | **Confirmed box**: LiDAR range kept, beam marked in `/obstacle_scan` |
+| Cardboard at the pixels where a LiDAR return lands | sees it (within `label_max_range`) | **Confirmed box**: LiDAR range kept, beam marked in `/obstacle_scan` |
 | Depth object nearer than the LiDAR, for 3 frames in a row | misses it (below the scan plane) | **Added** to `/fused_scan` |
-| Box colour nearer than the LiDAR | misses it | Ignored: colour can't measure height (could be a floor marking) |
+| Cardboard colour on the floor (tape, a flat sheet) | looks over it | Ignored: no LiDAR return lands on those pixels |
+| Tan furniture behind the track | sees the black ducting in front | Ignored: the LiDAR return's pixels are ducting |
 | Anything farther than the LiDAR | sees something nearer | Ignored |
 | Camera older than 0.2 s | – | `/fused_scan` is the plain LiDAR scan |
 
@@ -95,11 +99,11 @@ The camera never moves a LiDAR range; it only labels points or adds persistent o
 
 ### Driving: disparity extender with variable speed
 
-- **Disparity extender** (gap-following lecture, tweaks 2–4): at every range jump > 0.3 m, the nearer range is extended over enough beams to cover half the car plus `margin` (0.20 m; 0.25 m at confirmed boxes). The car then aims for the centre of the deepest remaining run of beams.
+- **Disparity extender** (gap-following lecture, tweaks 2–4): at every range jump > 0.3 m, the nearer range is extended over enough beams to cover half the car plus `margin` (0.20 m; 0.25 m at confirmed boxes). The width is kept from the whole near obstacle, not only its edge: a box seen from the side shows two faces as one surface, and its near corner needs more beams than the far end of the side face. The car then aims for the centre of the deepest remaining run of beams.
 - **Pure pursuit** steering from the rear axle (the LiDAR sits `lidar_x` = 0.27 m ahead of it), with a lookahead that grows with the measured speed, smoothed and clamped to ±0.4 rad. Treating the LiDAR as the rear axle turned every corner too sharply and made the car ride the inner wall.
 - **Variable speed**: the lowest of
   - `max_speed`;
-  - a braking limit that keeps the TTC to the planned arc at 2.5 × the time needed to stop;
+  - a braking limit that keeps the TTC to the planned arc at 2.5 × the time needed to stop; when something is within 0.4 m beside the turning side (the turn is cancelled at `side_clear` = 0.25 m), the straight path counts too;
   - a cornering limit √(a_lat / curvature);
   - `pass_speed` while passing a confirmed box.
 
@@ -139,7 +143,7 @@ The lap counter compares the current view with the start:
 - **LiDAR**: a range profile, matched over ±10° of heading.
 - The two similarities are averaged.
 
-A lap counts at the peak of the score, only after the score has dropped in a corner and the car has driven `min_lap_distance` (set to about ¾ of a lap) since the last lap.
+A lap counts at the peak of the score, only after the car has left the start and has driven `min_lap_distance` (set to about ¾ of a lap) since the last lap. "Left the start" means the score dropped below `rearm_threshold`, or the car drove `rearm_distance_fraction` of that distance: between solid walls the LiDAR score never drops that far, and with the score alone no lap was ever counted.
 
 ## Improvements over Milestones 2 and 3
 
@@ -150,12 +154,12 @@ A lap counts at the peak of the score, only after the score has dropped in a cor
 | AEB | Fixed 0.65 s TTC on every beam; MS3 used the depth camera, which can't see the black walls | LiDAR, path-aware, speed-dependent TTC plus a soft slow-down stage |
 | Static obstacles | Bubble around nearest point / passing on straights only | Extended disparities everywhere; wider margin and slower pass at confirmed boxes |
 | Dynamic obstacles | Own speed only | Optional obstacle-speed tracking |
-| Fusion | Camera *or* LiDAR | Camera labels LiDAR points; depth adds low objects |
+| Fusion | Camera *or* LiDAR | LiDAR returns projected into the camera image to label boxes; depth adds low objects |
 | Lap count | Camera only | Camera + LiDAR + odometry gate |
 
 ## Testing
 
-- **Unit and closed-loop tests** (`milestone4/test/`, 134 tests): the nodes' callbacks are called directly, with `test/ros_stubs.py` standing in for rclpy and the message types, so no ROS install is needed.
+- **Unit and closed-loop tests** (`milestone4/test/`, 150 tests): the nodes' callbacks are called directly, with `test/ros_stubs.py` standing in for rclpy and the message types, so no ROS install is needed.
 
   ```bash
   cd milestone4/test
@@ -185,7 +189,7 @@ A lap counts at the peak of the score, only after the score has dropped in a cor
 
 Try a value with a launch argument (`a_brake:=2.4`), then write it into `config/milestone4.yaml` and rebuild so it sticks.
 
-1. **Camera alignment**: overlay `/scan` and `/camera_scan` in rviz; adjust `cam_x` / `cam_yaw_deg` until the walls line up.
+1. **Camera alignment**: overlay `/scan` and `/camera_scan` in rviz; adjust `cam_x` / `cam_yaw_deg` until the walls line up. Measure `cam_z` (camera lens above the LiDAR's scan plane) with a ruler. Then put a box 1–3 m ahead and check that `/obstacle_scan` marks its whole face and nothing else.
 2. **Braking**: let AEB stop the car from a known speed v, measure the stopping distance d, and set `a_brake = v² / (2d)`.
 3. **Speed**: raise `max_speed` 1.0 → 1.25 → 1.5, watching `/safety/state` for unwanted `slow` or `aeb`; then tune `a_lat`.
 4. **Lap distance**: read the lap length from the `Lap 1 (... m driven)` log and set `min_lap_distance` to about ¾ of it.
@@ -199,7 +203,7 @@ Launch arguments override the file for one run, e.g. `max_speed:=1.25`. Tuning a
 | Argument | File value | Description |
 |---|---|---|
 | `max_speed` | 1.0 | Top speed, also the safety node's cap (m/s) |
-| `pass_speed` | 0.55 | Speed while passing a confirmed box (m/s) |
+| `pass_speed` | 0.8 | Speed while passing a confirmed box (m/s) |
 | `lookahead` / `gain` / `smoothing` | 2.0 / 1.0 / 0.6 | Pure pursuit distance (m), gain, steering smoothing |
 | `a_lat` | 2.5 | Cornering grip (m/s²) |
 | `margin` | 0.20 | Clearance beyond half the car at edges (m) |
@@ -212,7 +216,7 @@ Launch arguments override the file for one run, e.g. `max_speed:=1.25`. Tuning a
 | `use_camera` / `use_depth` / `start_camera` | true / false / false | Camera fusion, depth fusion, start the RealSense driver (launch defaults: they choose which nodes start) |
 | `odom_topic` | /odom | `/ego_racecar/odom` in the simulator (launch default) |
 | `params_file` | `config/milestone4.yaml` | Parameter file for all nodes |
-| `cam_x` / `cam_yaw_deg` | 0.0 / 0.0 | Camera offset from the LiDAR (m, degrees) |
+| `cam_x` / `cam_yaw_deg` / `cam_z` | 0.0 / 0.0 / 0.06 | Camera offset from the LiDAR: ahead (m), heading (degrees), height above the scan plane (m) |
 
 ## Dependencies
 

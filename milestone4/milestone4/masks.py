@@ -14,8 +14,9 @@ a binary image, like cv2.threshold (slide 20).
 
 Milestone 4 change: the two rules are kept as two separate masks. The wall mask
 and the box mask are combined with a bitwise OR (slide 19) for the driving scan,
-and the box mask alone becomes /camera_box_scan, which the fusion node uses to
-tell the LiDAR which of its points are boxes. A pixel is never in both masks.
+and the box mask alone is published as /camera_box_mask: the fusion node looks up
+each LiDAR point's pixel in it to tell which points are boxes. A pixel is never
+in both masks.
 
 Anything above the horizon (chairs, people, the room) is never used later, so
 it does not matter if it matches too.

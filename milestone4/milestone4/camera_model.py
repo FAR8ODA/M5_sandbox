@@ -154,3 +154,36 @@ def ground_points(us: np.ndarray, vs: np.ndarray,
 
     # scale the ray's forward and lateral parts by t to get the floor point.
     return forward_dir * t, xn * t, valid
+
+
+def image_points(forward: np.ndarray, lateral: np.ndarray, down: float,
+                 cam: CameraModel) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project points at a known height into the image (the inverse of ground_points).
+
+    ground_points needs the floor to turn a pixel into a distance. Here the distance is
+    already known (the LiDAR measured it), so no floor assumption is needed: the point's
+    pixel follows directly from the pinhole model.
+
+    Args:
+        forward (np.ndarray): Distance ahead of the camera, in metres.
+        lateral (np.ndarray): Distance to the side, in metres (positive = right).
+        down (float): How far the points are below the camera, in metres.
+        cam (CameraModel): Camera intrinsics and pitch (mount_height is not used).
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: (u, v, valid): pixel column and row of
+        each point (can be outside the image), and False for points behind the camera.
+    """
+    forward = np.asarray(forward, dtype=np.float64)
+    lateral = np.asarray(lateral, dtype=np.float64)
+    c, s = math.cos(cam.pitch_rad), math.sin(cam.pitch_rad)
+
+    # rotate from the vehicle frame into the tilted camera frame (ground_points does the
+    # opposite): depth along the optical axis, and the offset along the image-down axis.
+    depth = forward * c + down * s
+    y_cam = down * c - forward * s
+
+    # points closer than 5 cm in depth (or behind the camera) have no sensible pixel.
+    valid = depth > 0.05
+    safe = np.where(valid, depth, 1.0)
+    return cam.cx + cam.fx * lateral / safe, cam.cy + cam.fy * y_cam / safe, valid

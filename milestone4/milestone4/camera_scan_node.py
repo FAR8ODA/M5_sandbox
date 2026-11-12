@@ -1,14 +1,16 @@
-"""ROS 2 node: colour camera to LaserScans of the track walls and boxes.
+"""ROS 2 node: colour camera to a box mask and LaserScans of the track walls and boxes.
 
 Subscribes to the RealSense colour image and camera_info. Each frame is masked
-once into walls (black ducting) and boxes (cardboard), and two scans are
-published:
+once into walls (black ducting) and boxes (cardboard), and published as:
 
-    camera_scan       walls and boxes together (as in Milestone 3)
-    camera_box_scan   boxes only; the fusion node uses it to label LiDAR points
+    camera_box_mask   which pixels are cardboard (mono8, every mask_step-th pixel). The
+                      fusion node projects each LiDAR return into it to label boxes.
+    camera_scan       walls and boxes together as a LaserScan (as in Milestone 3)
+    camera_box_scan   boxes only, as a LaserScan
 
-A debug image is published on ``camera_scan/debug`` when someone is viewing it. The
-walls-and-boxes scan and the debug image are only built while someone subscribes to them.
+The mask is published for every frame. The two scans and the debug image on
+``camera_scan/debug`` are for viewing and tuning (rviz), so they are only built while
+someone subscribes to them.
 """
 
 from typing import Optional
@@ -19,6 +21,7 @@ from milestone4.boundary import mask_scan, ScanResult
 from milestone4.camera_model import CameraModel
 from milestone4.debug_draw import draw_debug
 from milestone4.masks import MaskParams, split_masks
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -37,6 +40,8 @@ class CameraScanNode(Node):
         self.declare_parameter('color_info_topic', '/camera/camera/color/camera_info')
         self.declare_parameter('scan_topic', 'camera_scan')
         self.declare_parameter('box_scan_topic', 'camera_box_scan')
+        self.declare_parameter('box_mask_topic', 'camera_box_mask')
+        self.declare_parameter('mask_step', 2)          # mask keeps every n-th pixel
         self.declare_parameter('scan_frame', 'camera_link')
 
         # Camera mounting on our car.
@@ -81,7 +86,9 @@ class CameraScanNode(Node):
             qos_profile_sensor_data
         )
 
-        # The two scans, and the debug image beside the main one.
+        # The box mask, the two scans, and the debug image beside the main one.
+        self.mask_publisher = self.create_publisher(
+            Image, str(self.get_parameter('box_mask_topic').value), 10)
         scan_topic = str(self.get_parameter('scan_topic').value)
         self.scan_publisher = self.create_publisher(LaserScan, scan_topic, 10)
         self.box_scan_publisher = self.create_publisher(
@@ -143,8 +150,33 @@ class CameraScanNode(Node):
         scan.ranges = result.ranges.astype(float).tolist()
         return scan
 
+    def to_mask_image(self, mask: np.ndarray, header) -> Image:
+        """Pack a box mask into a small mono8 Image message.
+
+        Only every mask_step-th pixel is kept (the default 2 quarters the message size).
+        The fusion node needs the mask's colour and rough shape, not its fine detail, and
+        scales the camera intrinsics by the same factor.
+
+        Args:
+            mask (np.ndarray): HxW uint8 mask, 255 on box pixels.
+            header: Header of the colour image (the mask keeps the frame's time).
+
+        Returns:
+            Image: The reduced mask.
+        """
+        step = max(1, int(self.get_parameter('mask_step').value))
+        small = np.ascontiguousarray(mask[::step, ::step])
+        image = Image()
+        image.header = header
+        image.height, image.width = int(small.shape[0]), int(small.shape[1])
+        image.encoding = 'mono8'
+        image.is_bigendian = 0
+        image.step = int(small.shape[1])
+        image.data = small.tobytes()
+        return image
+
     def color_callback(self, msg: Image) -> None:
-        """Compute and publish both camera scans for one colour frame.
+        """Compute and publish the box mask (and the scans, if viewed) for one colour frame.
 
         Args:
             msg (Image): Colour image from the camera.
@@ -161,17 +193,21 @@ class CameraScanNode(Node):
             # One HSV conversion gives both masks; walls and boxes never overlap.
             wall, box = split_masks(bgr, self.mask_params())
 
-            # The box scan is what the fusion node uses: always published.
-            # a box must stand on the floor: tan furniture seen above the black ducting does
-            # not (on the car it made the planner slow for boxes all round an empty track)
-            contact = int(self.get_parameter('box_contact_rows').value)
-            box_result = mask_scan(box, self.color_cam, num_beams, range_max, bottom,
-                                   not_below=wall, contact_rows=contact)
-            self.box_scan_publisher.publish(self.to_laserscan(box_result, msg.header.stamp))
+            # The box mask is what the fusion node uses: always published.
+            self.mask_publisher.publish(self.to_mask_image(box, msg.header))
 
-            # Walls + boxes and the debug image are only for viewing and tuning, so they are
+            # The scans and the debug image are only for viewing and tuning, so they are
             # built only while someone subscribes; this saves CPU on the Jetson, where a busy
             # processor makes the LiDAR scans arrive late.
+            if self.box_scan_publisher.get_subscription_count() > 0:
+                # a box must stand on the floor: tan furniture seen above the black ducting
+                # does not, and its floor distance would be wrong
+                contact = int(self.get_parameter('box_contact_rows').value)
+                box_result = mask_scan(box, self.color_cam, num_beams, range_max, bottom,
+                                       not_below=wall, contact_rows=contact)
+                self.box_scan_publisher.publish(
+                    self.to_laserscan(box_result, msg.header.stamp))
+
             debug = (self.get_parameter('publish_debug').value
                      and self.debug_publisher.get_subscription_count() > 0)
             if not debug and self.scan_publisher.get_subscription_count() == 0:

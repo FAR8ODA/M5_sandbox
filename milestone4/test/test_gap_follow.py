@@ -60,6 +60,21 @@ class GapFollowTest(unittest.TestCase):
         self.assertTrue(np.all(extended[100 - count:100] == 1.0))
         self.assertEqual(extended[100 - count - 1], 4.0)
 
+    def test_near_corner_of_a_box_seen_from_the_side_keeps_its_margin(self):
+        # a box seen from the side: its side face runs from the disparity (1.2 m, beam 100)
+        # to the near corner (0.8 m, beam 104), then the front face. The margin is 0.35 m at
+        # the near corner too, which needs more beams than at the far edge of the side face
+        ranges = np.full(200, 4.0)
+        ranges[100:105] = np.linspace(1.2, 0.8, 5)
+        ranges[105:140] = 0.8
+        extended = self.node.extend_disparities(ranges, np.zeros(200, bool), 0.01)
+
+        at_edge = 100 - math.ceil(math.atan2(0.35, 1.2) / 0.01)
+        at_corner = 104 - math.ceil(math.atan2(0.35, 0.8) / 0.01)
+        self.assertLess(at_corner, at_edge)                   # the corner reaches further
+        self.assertTrue(np.all(extended[at_corner:100] == 1.2))
+        self.assertEqual(extended[at_corner - 1], 4.0)
+
     def test_invalid_beams_are_not_disparities(self):
         ranges = np.full(200, 4.0)
         ranges[50] = 0.0                                      # one invalid reading
@@ -103,6 +118,28 @@ class GapFollowTest(unittest.TestCase):
         self.assertEqual(self.node.corner_check(r, self.angles, 0.3), 0.0)
         self.assertEqual(self.node.corner_check(r, self.angles, -0.3), -0.3)
 
+    def test_slows_for_the_straight_path_when_the_turn_may_be_cancelled(self):
+        # a wall 1 m ahead and to the right, open to the left, and the car already turning
+        # hard left at 1 m/s: the turn's own path is free. With something 0.3 m beside the
+        # car on the left (nearer than side_clear + 0.15 m), corner_check may cancel the turn
+        # on the next scan, so the speed must already suit the straight path into the wall.
+        # (It was the turn's speed, and AEB fired the moment the turn was cancelled.)
+        ranges = np.where(self.angles > math.radians(12.0), 4.0, 1.0)
+        beside = np.abs(self.angles - math.radians(100.0)) < math.radians(2.0)
+        speeds = []
+        for side in (3.0, 0.3):
+            ros_stubs.CLOCK.seconds = 0.0
+            node = GapFollowNode()
+            node.previous_speed, node.previous_steering = 1.0, 0.4
+            ranges[beside] = side
+            node.fused_callback(ros_stubs.make_scan(ranges))
+            drive = node.publishers_by_topic['drive_request'].messages[-1].drive
+            self.assertGreater(drive.steering_angle, 0.3)     # still turning left
+            speeds.append(drive.speed)
+        self.assertAlmostEqual(speeds[0], 1.0)                # nothing beside: the turn's speed
+        wall = math.cos(math.asin(self.node.CORRIDOR))        # nearest wall point on the path
+        self.assertAlmostEqual(speeds[1], self.node.braking_limit(wall), places=2)
+
     def test_corner_check_ignores_the_car_itself(self):
         r = np.full(self.angles.size, 3.0)
         r[np.abs(self.angles - math.radians(100.0)) < math.radians(2.0)] = 0.05   # own body
@@ -141,7 +178,7 @@ class GapFollowTest(unittest.TestCase):
         self.assertAlmostEqual(fast.calculate_speed(math.inf, 0.1, False), 2.0)  # gentle
 
     def test_box_pass_cap(self):
-        self.assertAlmostEqual(self.node.calculate_speed(math.inf, 0.0, True), 0.55)
+        self.assertAlmostEqual(self.node.calculate_speed(math.inf, 0.0, True), 0.8)
 
     def test_planner_never_asks_more_than_safety_allows(self):
         # same scans, same braking model: the planner's request is inside the safety band,

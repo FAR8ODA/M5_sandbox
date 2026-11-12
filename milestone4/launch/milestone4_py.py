@@ -70,6 +70,7 @@ TUNING_ARGS: List[Tuple[str, str, Callable]] = [
     # Camera mounting
     ('cam_x', 'Camera position ahead of the LiDAR (m).', float),
     ('cam_yaw_deg', 'Camera heading relative to the LiDAR (degrees).', float),
+    ('cam_z', 'Camera height above the LiDAR scan plane (m).', float),
 ]
 
 # Which node parameter each tuning argument sets: {node: {parameter: argument}}.
@@ -90,7 +91,7 @@ OVERRIDES: Dict[str, Dict[str, str]] = {
         'rearm_threshold': 'rearm_threshold', 'min_lap_distance': 'min_lap_distance',
     },
     'fusion_node': {
-        'cam_x': 'cam_x', 'cam_yaw_deg': 'cam_yaw_deg',
+        'cam_x': 'cam_x', 'cam_yaw_deg': 'cam_yaw_deg', 'cam_z': 'cam_z',
     },
 }
 
@@ -152,7 +153,8 @@ def launch_nodes(context: LaunchContext) -> list:
         ))
 
     if use_camera:
-        # Colour image -> /camera_scan (walls + boxes) and /camera_box_scan (boxes only).
+        # Colour image -> /camera_box_mask (cardboard pixels, for fusion_node). It also makes
+        # /camera_scan (walls + boxes) and /camera_box_scan for rviz, while they are viewed.
         # Track walls are matte black, which absorbs infrared, so walls are found by colour.
         actions.append(Node(
             package='milestone4', executable='camera_scan_node', name='camera_scan_node',
@@ -169,7 +171,8 @@ def launch_nodes(context: LaunchContext) -> list:
 
     # Fusion -------------------------------------------------------------------------------------
 
-    # /scan + /camera_box_scan + /depth_scan -> /fused_scan and /obstacle_scan.
+    # /scan + /camera_box_mask + /depth_scan -> /fused_scan and /obstacle_scan: each LiDAR
+    # return is projected into the box mask, so the LiDAR gives range and the camera class.
     actions.append(Node(
         package='milestone4', executable='fusion_node', name='fusion_node', output='screen',
         parameters=params('fusion_node', {'use_camera': use_camera, 'use_depth': use_depth}),

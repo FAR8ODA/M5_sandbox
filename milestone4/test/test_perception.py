@@ -151,16 +151,18 @@ if __name__ == '__main__':
 
 @unittest.skipUnless(ros_stubs.HAVE_CV2, 'OpenCV not installed')
 class CameraScanNodeTest(unittest.TestCase):
-    """The walls-and-boxes scan is only built while someone subscribes."""
+    """The box mask is always published; the scans only while someone subscribes."""
 
     def frame(self, node, subscribers):
         img = np.full((480, 640, 3), 180, dtype=np.uint8)
         img[300:340, :] = (20, 20, 20)                         # black ducting
+        img[380:420, 280:360] = (40, 120, 200)                 # a cardboard box (BGR)
         node.bridge.imgmsg_to_cv2 = lambda msg, desired_encoding='bgr8': img
         node.publishers_by_topic['camera_scan'].subscribers = subscribers
+        node.publishers_by_topic['camera_box_scan'].subscribers = subscribers
         node.color_callback(ros_stubs.Image())
 
-    def test_full_scan_only_when_subscribed(self):
+    def test_scans_only_when_subscribed(self):
         from milestone4.camera_scan_node import CameraScanNode
         info = ros_stubs.CameraInfo()
         info.k, info.width, info.height = [380.0, 0, 320.0, 0, 380.0, 240.0, 0, 0, 1], 640, 480
@@ -168,10 +170,26 @@ class CameraScanNodeTest(unittest.TestCase):
         node.color_info_callback(info)
         self.frame(node, subscribers=0)
         self.assertEqual(len(node.publishers_by_topic['camera_scan'].messages), 0)
-        self.assertEqual(len(node.publishers_by_topic['camera_box_scan'].messages), 1)
+        self.assertEqual(len(node.publishers_by_topic['camera_box_scan'].messages), 0)
+        self.assertEqual(len(node.publishers_by_topic['camera_box_mask'].messages), 1)
         self.frame(node, subscribers=1)
         self.assertEqual(len(node.publishers_by_topic['camera_scan'].messages), 1)
-        self.assertEqual(len(node.publishers_by_topic['camera_box_scan'].messages), 2)
+        self.assertEqual(len(node.publishers_by_topic['camera_box_scan'].messages), 1)
+        self.assertEqual(len(node.publishers_by_topic['camera_box_mask'].messages), 2)
+
+    def test_box_mask_is_the_cardboard_at_half_resolution(self):
+        from milestone4.camera_scan_node import CameraScanNode
+        info = ros_stubs.CameraInfo()
+        info.k, info.width, info.height = [380.0, 0, 320.0, 0, 380.0, 240.0, 0, 0, 1], 640, 480
+        node = CameraScanNode()
+        node.color_info_callback(info)
+        self.frame(node, subscribers=0)
+        msg = node.publishers_by_topic['camera_box_mask'].messages[-1]
+        self.assertEqual((msg.height, msg.width, msg.step, msg.encoding), (240, 320, 320, 'mono8'))
+        mask = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width)
+        self.assertTrue(np.all(mask[192:208, 142:178] == 255))  # the box (rows 380-420 / 2)
+        self.assertEqual(int(mask[:185].sum()), 0)             # the ducting and floor are not
+        self.assertEqual(int(mask[:, :135].sum()), 0)
 
     def test_box_scan_ignores_tan_above_the_ducting(self):
         from milestone4.camera_scan_node import CameraScanNode
@@ -179,6 +197,7 @@ class CameraScanNodeTest(unittest.TestCase):
         info.k, info.width, info.height = [380.0, 0, 320.0, 0, 380.0, 240.0, 0, 0, 1], 640, 480
         node = CameraScanNode()
         node.color_info_callback(info)
+        node.publishers_by_topic['camera_box_scan'].subscribers = 1   # e.g. rviz
         tan = (40, 120, 200)                                   # cardboard colour (BGR)
 
         def box_ranges(img):

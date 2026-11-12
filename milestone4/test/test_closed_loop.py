@@ -95,6 +95,20 @@ class ClosedLoopTest(unittest.TestCase):
             self.assertGreater(len(held), 100)                 # watched for over 2.5 s
             self.assertLess(max(held), 0.01)                   # and it stayed stopped
 
+    def test_blocked_lane_with_weak_late_brakes(self):
+        # the braking model assumes a_brake = 2.0 m/s^2 and no motor delay. The real car may
+        # brake weaker and later: here at a third of that (0.7 m/s^2) and 0.2 s late. The
+        # planner starts slowing well before the boxes (plan_factor), so the body (bumper
+        # 0.15 m ahead of the LiDAR) must still keep 10 cm from walls and boxes, and stop.
+        world = np.vstack([self.track, cl.blocking_boxes()])
+        for speed in (1.0, 1.5):
+            result = cl.run(world, num_laps=3, min_lap_distance=self.gate, max_time=25,
+                            car_brake=0.7, drive_delay=0.2, lidar_to_bumper=0.15,
+                            **dict(cl.REALISTIC_CAR, max_speed=speed))
+            self.assertGreater(result['body_clearance'], 0.10)
+            self.assertEqual(result['mode'], 'aeb')
+            self.assertLess(result['trace'][-1][3], 0.01)     # stopped
+
     def test_obstacle_speed_tracking_prevents_a_crash(self):
         # on a long straight, a box is pushed at the moving car, then stops. Its own speed in
         # the variable TTC makes the car brake earlier; ignoring it leaves less room.
@@ -182,11 +196,12 @@ class ClosedLoopTest(unittest.TestCase):
             self.assert_no_crash(result)
             self.assertEqual(result['laps'], 1)
             self.assertEqual(result['mode'], 'stopped')        # the lap stop, not AEB
-            # with the old 0.12 m margin (and pure pursuit from the LiDAR, as then) it cut the
-            # first corner and AEB stopped it
-            old = cl.run(track, num_laps=1, min_lap_distance=0.75 * lap, max_time=10,
+            # with the old 0.12 m margin (and pure pursuit from the LiDAR, as then) it cuts the
+            # corners: the body passes at least 5 cm nearer the inner wall (AEB stopped it
+            # on the car, and still does here on the 1.2 m track)
+            old = cl.run(track, num_laps=1, min_lap_distance=0.75 * lap, max_time=40,
                          margin=0.12, planner={'lidar_x': 0.0}, **cl.REALISTIC_CAR)
-            self.assertEqual(old['mode'], 'aeb')
+            self.assertLess(old['body_clearance'], result['body_clearance'] - 0.05)
 
     def test_steering_mismatch_with_tracking_on(self):
         # the third car test: the car steers 70% of what it is told. With obstacle tracking
@@ -207,16 +222,19 @@ class ClosedLoopTest(unittest.TestCase):
 
     def test_realistic_car_passes_boxes_with_calm_steering(self):
         # the fourth car test: the steering twitched. With the real car's steering delay and
-        # noisy odometry, the old smoothing (0.3) ran into AEB at a box; 0.6 laps cleanly
+        # noisy odometry, smoothing 0.6 laps cleanly and steers calmer than the old 0.3.
+        # (0.3 used to run into AEB at the first box. So did 0.6 once the simulated LiDAR
+        # saw the box's side face: the planner kept its clearance from the far end of that
+        # face, not the near corner, and corner_check cancelled the turn at full speed.)
         world = np.vstack([self.track, cl.box(1.5, 0.25), cl.box(-1.0, 3.75)])
         calm = cl.run(world, num_laps=2, min_lap_distance=self.gate, max_time=120,
                       **cl.REALISTIC_CAR)
         self.assert_no_crash(calm)
         self.assertEqual(calm['laps'], 2)
         self.assertEqual(calm['mode'], 'stopped')
+        self.assertGreater(calm['body_clearance'], 0.10)       # the box's near corner
         twitchy = cl.run(world, num_laps=2, min_lap_distance=self.gate, max_time=120,
                          smoothing=0.3, **cl.REALISTIC_CAR)
-        self.assertEqual(twitchy['mode'], 'aeb')
         self.assertLess(calm['steer_jitter'], 0.8 * twitchy['steer_jitter'])
 
     def test_lidar_dropout_stops_then_resumes(self):

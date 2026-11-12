@@ -217,10 +217,16 @@ class LaserScan:
 
 
 class Image:
-    """sensor_msgs/Image (header only)."""
+    """sensor_msgs/Image."""
 
     def __init__(self) -> None:
         self.header = Header()
+        self.height = 0
+        self.width = 0
+        self.encoding = ''
+        self.is_bigendian = 0
+        self.step = 0
+        self.data = b''
 
 
 class CameraInfo:
@@ -348,6 +354,8 @@ install()
 LIDAR_ANGLE_MIN = -2.35619449   # Hokuyo 10LX: 270 degrees ...
 LIDAR_INCREMENT = 0.00436332    # ... in 0.25 degree steps
 LIDAR_BEAMS = 1081
+WALL_STEP = 0.005               # spacing of simulated wall points (m)
+WALL_POINT_RADIUS = 0.004       # each point is a disc this big; > WALL_STEP / 2 = solid wall
 
 
 def lidar_angles():
@@ -391,8 +399,12 @@ def world_scan(world, x: float, y: float, yaw: float):
     """
     Return simulated LiDAR ranges of world points (Nx2, m) seen from a car pose.
 
-    Each beam keeps the nearest point that falls on it, so dense points (a few mm apart)
-    behave like solid walls.
+    Each point is a small disc (WALL_POINT_RADIUS) and each beam keeps the nearest disc it
+    crosses. Discs on a wall built from points WALL_STEP apart overlap, so the wall is solid
+    at any angle and range. (Snapping each point to its single nearest beam left beams with
+    no point near the car, where the beams are closer together along a slanted wall than
+    the points: those beams saw through the wall, e.g. a box 4 m away behind the inner
+    wall 0.66 m away.)
     """
     import math
     import numpy as np
@@ -401,14 +413,25 @@ def world_scan(world, x: float, y: float, yaw: float):
     px = c * d[:, 0] - s * d[:, 1]
     py = s * d[:, 0] + c * d[:, 1]
     r = np.hypot(px, py)
-    beams = np.round((np.arctan2(py, px) - LIDAR_ANGLE_MIN) / LIDAR_INCREMENT).astype(int)
-    inside = (beams >= 0) & (beams < LIDAR_BEAMS)
+    keep = r > WALL_POINT_RADIUS                  # the LiDAR is not inside a disc
+    r, bearing = r[keep], np.arctan2(py[keep], px[keep])
+    half = np.arcsin(WALL_POINT_RADIUS / r)       # angular half-width of each disc
+    first = np.ceil((bearing - half - LIDAR_ANGLE_MIN) / LIDAR_INCREMENT).astype(int)
+    last = np.floor((bearing + half - LIDAR_ANGLE_MIN) / LIDAR_INCREMENT).astype(int)
     out = np.full(LIDAR_BEAMS, np.inf)
-    np.minimum.at(out, beams[inside], r[inside])
+    # beams first .. last cross a disc (none if it falls between two beams); few discs
+    # cover more than one beam, so each pass works on fewer points
+    beam = first
+    while beam.size:
+        hit = beam <= last
+        beam, last, r = beam[hit], last[hit], r[hit]
+        inside = (beam >= 0) & (beam < LIDAR_BEAMS)
+        np.minimum.at(out, beam[inside], r[inside])
+        beam = beam + 1
     return out
 
 
-def wall_points(x0: float, y0: float, x1: float, y1: float, step: float = 0.005):
+def wall_points(x0: float, y0: float, x1: float, y1: float, step: float = WALL_STEP):
     """Return dense points (Nx2) along a straight wall from (x0, y0) to (x1, y1)."""
     import numpy as np
     n = max(2, int(np.hypot(x1 - x0, y1 - y0) / step))

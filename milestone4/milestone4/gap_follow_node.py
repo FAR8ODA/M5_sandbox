@@ -87,7 +87,7 @@ class GapFollowNode(Node):
         # Main tuning parameters (values in config/milestone4.yaml):
         self.declare_parameter('max_speed', 1.0)
         self.declare_parameter('min_speed', 0.35)
-        self.declare_parameter('pass_speed', 0.55)
+        self.declare_parameter('pass_speed', 0.8)
         self.declare_parameter('gain', 1.0)
         self.declare_parameter('lookahead', 2.0)
 
@@ -146,6 +146,7 @@ class GapFollowNode(Node):
         self.BOX_MARGIN = float(p('box_margin').value)       # clearance at a confirmed box (m)
         self.DEEP_FRACTION = float(p('deep_fraction').value)  # near-deepest beams count too
         self.MIN_GAP_RANGE = float(p('min_gap_range').value)  # shallower deepest: no gap (m)
+        self.SURFACE_SPAN = math.radians(60.0)               # obstacle surface searched (rad)
         self.LIDAR_X = float(p('lidar_x').value)             # LiDAR ahead of the rear axle (m)
 
         # Steering parameters:
@@ -161,6 +162,7 @@ class GapFollowNode(Node):
         self.SMOOTHING = float(p('smoothing').value)
         self.SIDE_ANGLE = math.radians(float(p('side_angle_deg').value))  # side region starts here
         self.SIDE_CLEAR = float(p('side_clear').value)       # nearer beside us: no turn (m)
+        self.SIDE_WARN = 0.15                                # this much earlier: slow down (m)
         self.SIDE_MAX_ANGLE = math.radians(float(p('side_max_angle_deg').value))  # region end
         self.SIDE_MIN_RANGE = float(p('side_min_range').value)  # nearer: the car itself (m)
 
@@ -335,6 +337,11 @@ class GapFollowNode(Node):
         the end of a barrier. The extension is counted from the near edge across the missing
         beams, which stay invalid (never a target).
 
+        The width is kept from the whole near obstacle, not only from its edge. A box seen
+        from the side shows two faces as one surface, and the disparity is at the far end of
+        the side face. Measuring the width there left the near corner too little room (0.27 m
+        instead of 0.35 m in the simulator), and the planned arc brushed it at full speed.
+
         Args:
             ranges: cleaned ranges (0.0 = invalid)
             boxes: True for beams the camera confirmed as boxes
@@ -350,6 +357,7 @@ class GapFollowNode(Node):
         # ranges jump by more than the threshold; i is the lower beam index, j the upper
         valid = np.nonzero(ranges > 0.0)[0]
         jumps = np.nonzero(np.abs(np.diff(ranges[valid])) > self.DISPARITY_THRESHOLD)[0]
+        jump_set = set(int(k) for k in jumps)
         for k in jumps:
             i, j = int(valid[k]), int(valid[k + 1])
             near = min(ranges[i], ranges[j])
@@ -358,14 +366,30 @@ class GapFollowNode(Node):
             margin = self.BOX_MARGIN if (boxes[i] or boxes[j]) else self.MARGIN
             width = self.CAR_HALF_WIDTH + margin
 
-            # beams needed to cover that width at the obstacle's range
-            count = int(math.ceil(math.atan2(width, near) / angle_increment))
+            # the near obstacle's surface: the valid beams from the edge back to its other
+            # edge (the next disparity), at most SURFACE_SPAN away
+            span = int(self.SURFACE_SPAN / angle_increment)
+            if ranges[j] > ranges[i]:
+                first = k
+                while first > 0 and (first - 1) not in jump_set and i - valid[first - 1] <= span:
+                    first -= 1
+                surface = valid[first:k + 1]
+            else:
+                last = k + 1
+                while (last < valid.size - 1 and last not in jump_set
+                       and valid[last + 1] - j <= span):
+                    last += 1
+                surface = valid[k + 1:last + 1]
+
+            # beams needed to cover that width at each surface point's range: a point nearer
+            # than the edge (the near corner of a box seen from the side) needs more of them
+            counts = np.ceil(np.arctan2(width, ranges[surface]) / angle_increment).astype(int)
 
             # overwrite the farther side from the near edge on, never making a beam longer
             if ranges[j] > ranges[i]:
-                lo, hi = i + 1, min(n, i + 1 + count)
+                lo, hi = i + 1, min(n, int(np.max(surface + counts)) + 1)
             else:
-                lo, hi = max(0, j - count), j
+                lo, hi = max(0, int(np.min(surface - counts))), j
             extended[lo:hi] = np.minimum(extended[lo:hi], near)
 
         return extended
@@ -462,18 +486,31 @@ class GapFollowNode(Node):
         Returns:
             steering: unchanged, or 0.0 if the turning side is too close
         """
+        if self.side_distance(ranges, angles, steering) < self.SIDE_CLEAR:
+            self.previous_steering = 0.0
+            return 0.0
+        return steering
+
+    def side_distance(self, ranges: np.ndarray, angles: np.ndarray, steering: float) -> float:
+        """
+        Nearest thing beside the car on the side it is turning to.
+
+        Args:
+            ranges: cleaned ranges (0.0 = invalid)
+            angles: angle of each beam (rad)
+            steering: steering angle about to be sent (rad)
+
+        Returns:
+            distance: nearest side reading (m); inf if there is none or the car is not turning
+        """
         if steering > 0.0:
             side = (angles >= self.SIDE_ANGLE) & (angles <= self.SIDE_MAX_ANGLE)
         elif steering < 0.0:
             side = (angles <= -self.SIDE_ANGLE) & (angles >= -self.SIDE_MAX_ANGLE)
         else:
-            return steering
-
+            return math.inf
         beside = ranges[side & (ranges >= self.SIDE_MIN_RANGE)]
-        if beside.size and float(beside.min()) < self.SIDE_CLEAR:
-            self.previous_steering = 0.0
-            return 0.0
-        return steering
+        return float(beside.min()) if beside.size else math.inf
 
     # [ Step 5 ] speed
 
@@ -651,6 +688,7 @@ class GapFollowNode(Node):
                                        throttle_duration_sec=1.0)
                 return
             steering = self.calculate_steering_angle(float(angles[index]), float(extended[index]))
+            beside = self.side_distance(ranges, angles, steering)
             steering = self.corner_check(ranges, angles, steering)
 
             # d. choose the speed and publish
@@ -660,6 +698,10 @@ class GapFollowNode(Node):
                                        if passing else 'box passed: back to full speed')
                 self.passing = passing
             free = self.path_clearance(msg, angles, steering)
+            # the turning side is nearly close enough for corner_check to cancel the turn:
+            # the straight path it would switch to must be safe at this speed as well
+            if beside < self.SIDE_CLEAR + self.SIDE_WARN:
+                free = min(free, self.path_clearance(msg, angles, 0.0))
             speed = self.ramp(self.calculate_speed(free, steering, passing))
             self.previous_speed = speed
             self.publish_drive(steering, speed)

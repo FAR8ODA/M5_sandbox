@@ -4,19 +4,29 @@ LiDAR and camera fusion (no ROS code).
 The LiDAR is the primary sensor: 270 degrees, 1080 beams, about 4 cm accuracy and 40 Hz,
 and it sees the black ducting. The camera adds what the LiDAR cannot know:
 
-    Box labels:  the colour image tells cardboard from ducting. A camera box point that
-                 lands on a LiDAR return (same bearing, ranges within assoc_tol) marks
-                 that LiDAR beam as a confirmed box. The LiDAR range is kept, because it
-                 is the more accurate one.
+    Box labels:  the colour image tells cardboard from ducting. Every LiDAR return is
+                 projected to its pixel in the camera's box mask (box_labels); if the
+                 pixels around it are cardboard, that LiDAR beam is a confirmed box. The
+                 LiDAR gives the range and the camera gives the class.
     Low objects: a depth point clearly nearer than anything the LiDAR sees at that bearing
                  is something the LiDAR plane misses, such as a low object. It is only
                  trusted after persist_frames camera frames in a row, so a single noisy
                  frame can never create a phantom obstacle. It is written into the
                  fused scan only: it is not a box, so it gets no box margin or pass speed.
 
-Colour points only ever label LiDAR returns; they never add an object of their own. The
-colour scan cannot measure height, so a flat orange line taped on the floor would look
-like the base of a box. The depth scan measures height (floor rejected), so it can.
+Why project the LiDAR into the image, instead of matching ranges: the camera can only
+measure a range from the pixel where a box meets the floor, and at a camera height of
+0.187 m that is very sensitive to pitch. One degree of pitch (braking, a bump) moves a
+box at 2 m by about 0.4 m, more than any sensible matching tolerance, so the labels
+dropped out exactly when the car braked for a box. A pixel's column and row hardly depend
+on the range, so asking "what colour is the image where the LiDAR hit?" keeps working: a
+degree of pitch moves the pixel by about 1/60 of the focal length, and a strip of rows
+(label_strip) is checked, not one pixel.
+
+Colour only ever labels LiDAR returns; it never adds an object of its own. A flat orange
+line taped on the floor has no LiDAR return to label (and lies far below the LiDAR's
+pixels), and tan furniture behind the track is hidden from the LiDAR by the ducting, whose
+pixels are black. The depth scan measures height (floor rejected), so it may add objects.
 Colour wall points are never fused: on walls the LiDAR is better in every way.
 
 Frames: camera points are (x ahead, y left) in the camera frame. They are rotated by
@@ -30,6 +40,7 @@ from dataclasses import dataclass
 import math
 from typing import List, Tuple
 
+from milestone4.camera_model import CameraModel, image_points
 import numpy as np
 
 
@@ -41,33 +52,39 @@ class FusionParams:
         cam_x (float): Camera position ahead of the LiDAR (m).
         cam_y (float): Camera position left of the LiDAR (m).
         cam_yaw (float): Camera heading relative to the LiDAR (rad, left positive).
-        assoc_tol (float): Camera and LiDAR ranges this close are the same object (m).
-        assoc_window (int): LiDAR beams searched on each side of a camera point.
-        persist_frames (int): Camera frames in a row before a camera-only point is trusted.
+        cam_z (float): Camera height above the LiDAR's scan plane (m).
+        assoc_tol (float): Depth and LiDAR ranges this close are the same object (m).
+        assoc_window (int): LiDAR beams searched on each side of a depth point.
+        persist_frames (int): Camera frames in a row before a depth-only point is trusted.
+        label_strip (float): Half-height of the pixel strip checked around each projected
+            LiDAR point, as an angle (rad). It absorbs pitch and cam_z errors.
+        label_fraction (float): Share of the strip that must be box pixels (0-1).
+        label_max_range (float): LiDAR returns farther than this are not labelled (m).
     """
 
     cam_x: float = 0.0
     cam_y: float = 0.0
     cam_yaw: float = 0.0
+    cam_z: float = 0.06
     assoc_tol: float = 0.25
     assoc_window: int = 4
     persist_frames: int = 3
+    label_strip: float = math.radians(2.0)
+    label_fraction: float = 0.5
+    label_max_range: float = 4.0
 
 
 @dataclass
 class CameraPoints:
-    """Camera points already placed on LiDAR beams.
+    """Depth camera points already placed on LiDAR beams.
 
     Attributes:
         beams (np.ndarray): LiDAR beam index of each point.
         ranges (np.ndarray): Distance of each point from the LiDAR (m).
-        is_box (bool): True for cardboard points from the colour image,
-            False for depth points.
     """
 
     beams: np.ndarray
     ranges: np.ndarray
-    is_box: bool
 
 
 def scan_to_points(ranges, angle_min: float, angle_increment: float,
@@ -112,6 +129,93 @@ def camera_to_lidar(x: np.ndarray, y: np.ndarray, params: FusionParams,
     return xl, yl
 
 
+def lidar_to_camera(x: np.ndarray, y: np.ndarray, params: FusionParams,
+                    shift_x: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Move LiDAR points into the camera frame (the inverse of camera_to_lidar).
+
+    Args:
+        x (np.ndarray): Points ahead of the LiDAR (m).
+        y (np.ndarray): Points left of the LiDAR (m).
+        params (FusionParams): Camera mounting relative to the LiDAR.
+        shift_x (float): Distance the car drove between the camera frame and the LiDAR
+            scan (m). Points are moved this much farther away, to where the camera saw them.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: (x ahead, y left) in the camera frame (m).
+    """
+    c, s = math.cos(params.cam_yaw), math.sin(params.cam_yaw)
+    dx, dy = x - params.cam_x + shift_x, y - params.cam_y
+    return c * dx + s * dy, c * dy - s * dx
+
+
+def column_counts(mask: np.ndarray) -> np.ndarray:
+    """
+    Count the box pixels down every column of a mask, once per camera frame.
+
+    With these running counts, the number of box pixels in any strip of rows of a column is
+    one subtraction, so labelling a whole LiDAR scan (40 Hz) costs almost nothing.
+
+    Args:
+        mask (np.ndarray): HxW mask, non-zero on box pixels.
+
+    Returns:
+        np.ndarray: (H + 1) x W counts; counts[r, c] = box pixels in rows 0 .. r-1 of column c.
+    """
+    mask = np.asarray(mask)
+    counts = np.zeros((mask.shape[0] + 1, mask.shape[1]), dtype=np.int32)
+    np.cumsum(mask > 0, axis=0, out=counts[1:])
+    return counts
+
+
+def box_labels(lidar: np.ndarray, angle_min: float, angle_increment: float,
+               counts: np.ndarray, cam: CameraModel, params: FusionParams,
+               shift_x: float = 0.0) -> np.ndarray:
+    """
+    Find the LiDAR beams that hit a cardboard box, by looking at their pixels.
+
+    Each LiDAR return is projected into the box mask. Around its pixel, a vertical strip
+    of +/- label_strip is checked; the beam is a box if at least label_fraction of the
+    strip is box pixels. A box face runs from the floor to its top, well above and below
+    the LiDAR's plane, so the strip stays on it even when the car pitches.
+
+    Args:
+        lidar (np.ndarray): Cleaned LiDAR ranges (m), inf where invalid.
+        angle_min (float): Bearing of the LiDAR's first beam (rad).
+        angle_increment (float): Spacing between LiDAR beams (rad).
+        counts (np.ndarray): column_counts() of the box mask.
+        cam (CameraModel): Intrinsics at the mask's resolution, and the camera pitch.
+        params (FusionParams): Camera mounting and label settings.
+        shift_x (float): Distance driven between the camera frame and the LiDAR scan (m).
+
+    Returns:
+        np.ndarray: True for every beam whose return is on a box.
+    """
+    lidar = np.asarray(lidar, dtype=np.float64)
+    labels = np.zeros(lidar.size, dtype=bool)
+    index = np.nonzero(np.isfinite(lidar) & (lidar <= params.label_max_range))[0]
+    if index.size == 0 or counts.size == 0:
+        return labels
+
+    # the LiDAR returns as seen from the camera, cam_z below it
+    angles = angle_min + index * angle_increment
+    x, y = lidar_to_camera(lidar[index] * np.cos(angles), lidar[index] * np.sin(angles),
+                           params, shift_x)
+    u, v, valid = image_points(x, -y, params.cam_z, cam)       # lateral: right positive
+
+    # the strip of rows around each pixel, cut off at the image edges
+    height, width = counts.shape[0] - 1, counts.shape[1]
+    half = cam.fy * math.tan(params.label_strip)
+    inside = valid & (u >= 0.0) & (u <= width - 1.0) & (v >= 0.0) & (v <= height - 1.0)
+    col = np.round(u[inside]).astype(int)
+    top = np.clip(np.floor(v[inside] - half), 0, height - 1).astype(int)
+    bottom = np.clip(np.ceil(v[inside] + half), 0, height - 1).astype(int)
+
+    box_pixels = counts[bottom + 1, col] - counts[top, col]
+    labels[index[inside]] = box_pixels >= params.label_fraction * (bottom - top + 1)
+    return labels
+
+
 def points_to_beams(x: np.ndarray, y: np.ndarray, angle_min: float, angle_increment: float,
                     num_beams: int) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -153,7 +257,7 @@ def clean_lidar(ranges, range_min: float, range_max: float) -> np.ndarray:
 
 
 class ScanFuser:
-    """Fuse camera points into LiDAR scans, remembering persistence between scans."""
+    """Fuse box labels and depth points into LiDAR scans, remembering persistence."""
 
     def __init__(self, params: FusionParams) -> None:
         """Store the settings; persistence counters start empty.
@@ -166,18 +270,20 @@ class ScanFuser:
         self.trusted: np.ndarray | None = None   # beams the last fuse() added from depth
 
     def fuse(self, lidar_ranges, range_min: float, range_max: float,
-             sources: List[CameraPoints],
-             new_camera_frame: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+             sources: List[CameraPoints], new_camera_frame: bool = True,
+             labels: np.ndarray | None = None) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Fuse one LiDAR scan with the latest camera points.
+        Fuse one LiDAR scan with the latest camera data.
 
         Args:
             lidar_ranges: Raw LiDAR ranges (m).
             range_min (float): LiDAR range_min (m).
             range_max (float): LiDAR range_max (m).
-            sources (List[CameraPoints]): Camera points already placed on LiDAR beams.
+            sources (List[CameraPoints]): Depth points already placed on LiDAR beams.
             new_camera_frame (bool): True if any source is a camera frame not used before.
                 Persistence only counts new frames (camera 30 Hz, LiDAR 40 Hz).
+            labels (np.ndarray | None): Per beam, True where box_labels() found a box;
+                None if there is no fresh colour frame.
 
         Returns:
             Tuple[np.ndarray, np.ndarray]: (fused, obstacle). fused is the raw LiDAR scan
@@ -194,7 +300,11 @@ class ScanFuser:
 
         fused = raw.copy()
         obstacle = np.full(n, np.inf)
-        seen = np.zeros(n, dtype=bool)          # beams with a camera-only point this frame
+        if labels is not None and labels.size == n:
+            # a label only marks a beam the LiDAR has a return on; the LiDAR range is kept
+            hit = labels & np.isfinite(lidar)
+            obstacle[hit] = lidar[hit]
+        seen = np.zeros(n, dtype=bool)         # beams with a camera-only point this frame
         camera_only = np.full(n, np.inf)        # nearest camera-only range on each beam
 
         w = max(0, int(self.params.assoc_window))
@@ -207,17 +317,9 @@ class ScanFuser:
             # the LiDAR beams around each camera point
             window = np.clip(src.beams[:, None] + offsets[None, :], 0, n - 1)
             lidar_window = lidar[window]
-            close = np.abs(lidar_window - src.ranges[:, None]) <= tol
 
-            # associated: the LiDAR sees the same object; a box label marks those beams
-            if src.is_box:
-                hit = window[close]
-                obstacle[hit] = lidar[hit]
-
-            # camera-only: clearly nearer than anything the LiDAR sees there. Only depth
-            # points, which measure height, may add an object (see the module docstring)
-            if src.is_box:
-                continue
+            # depth-only: clearly nearer than anything the LiDAR sees there. A depth point
+            # on a LiDAR return adds nothing: the LiDAR range is the more accurate one
             nearer = src.ranges < lidar_window.min(axis=1) - tol
             beams = src.beams[nearer]
             seen[beams] = True

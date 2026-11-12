@@ -5,13 +5,15 @@ Our fusion_node runs once per LiDAR scan (40 Hz). The LiDAR is the primary senso
 camera adds box labels and objects the LiDAR plane misses. The rules live in fusion.py.
 
 The fusion node:
-    a. takes the latest /camera_box_scan (colour, boxes only) and /depth_scan (floor rejected)
-    b. moves their points into the LiDAR frame, correcting for how far the car drove since
-       the camera frame (odometry speed x time difference)
+    a. takes the latest /camera_box_mask (which pixels are cardboard) and /depth_scan
+       (floor rejected)
+    b. lines them up with the LiDAR scan, correcting for how far the car drove since the
+       camera frame (odometry speed x time difference)
     c. fuses them into the LiDAR scan:
-         - a box point on a LiDAR return marks that beam as a confirmed box
+         - every LiDAR return is projected to its pixel in the box mask; if the pixels
+           around it are cardboard, that beam is a confirmed box (LiDAR range, camera class)
          - a depth point clearly nearer than the LiDAR is added after persist_frames frames
-           (colour points only label: they cannot measure height, so they never add)
+           (colour only labels: it cannot measure height, so it never adds)
     d. publishes /fused_scan (LiDAR geometry, drop-in for /scan), /obstacle_scan (beams the
        colour camera confirmed as boxes, inf elsewhere) and /fusion/mode ('fused' or
        'lidar_only')
@@ -22,7 +24,7 @@ The depth scan is off by default (use_depth:=true turns it on): if the camera pi
 height is slightly off, the floor gets past the floor rejection and appears as obstacles.
 Check /depth_scan on an empty floor first (README tuning step 4).
 
-If the camera scans stop arriving, the output is the LiDAR scan unchanged, so the car
+If the camera data stops arriving, the output is the LiDAR scan unchanged, so the car
 keeps driving on the LiDAR alone.
 """
 
@@ -30,14 +32,17 @@ from __future__ import annotations
 
 import math
 
-from milestone4.fusion import (camera_to_lidar, CameraPoints, FusionParams,
-                                       points_to_beams, scan_to_points, ScanFuser)
+from milestone4.camera_model import CameraModel
+from milestone4.fusion import (box_labels, camera_to_lidar, CameraPoints, clean_lidar,
+                               column_counts, FusionParams, points_to_beams, scan_to_points,
+                               ScanFuser)
 from nav_msgs.msg import Odometry
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import CameraInfo, Image, LaserScan
 from std_msgs.msg import String
 
 
@@ -47,7 +52,7 @@ def stamp_seconds(stamp) -> float:
 
 
 class FusionNode(Node):
-    """Fuse camera box and depth scans into the LiDAR scan."""
+    """Fuse the camera's box mask and depth scan into the LiDAR scan."""
 
     def __init__(self) -> None:
         """Declare parameters and create the fuser, subscriptions and publishers."""
@@ -63,8 +68,16 @@ class FusionNode(Node):
         self.declare_parameter('cam_x', 0.0)             # ahead of the LiDAR (m)
         self.declare_parameter('cam_y', 0.0)             # left of the LiDAR (m)
         self.declare_parameter('cam_yaw_deg', 0.0)       # heading offset (degrees, left positive)
+        self.declare_parameter('cam_z', 0.06)            # above the LiDAR's scan plane (m)
+        self.declare_parameter('pitch_deg', -5.3)        # camera pitch (positive = tilted down)
+        self.declare_parameter('color_info_topic', '/camera/camera/color/camera_info')
 
-        # Association and persistence (see fusion.py):
+        # Box labels: the pixels checked around each projected LiDAR return (see fusion.py):
+        self.declare_parameter('label_strip_deg', 2.0)   # strip half-height, as an angle
+        self.declare_parameter('label_fraction', 0.5)    # share of the strip that must be box
+        self.declare_parameter('label_max_range', 4.0)   # farther returns are not labelled (m)
+
+        # Depth association and persistence (see fusion.py):
         defaults = FusionParams()
         self.declare_parameter('assoc_tol', defaults.assoc_tol)
         self.declare_parameter('assoc_window', defaults.assoc_window)
@@ -79,15 +92,23 @@ class FusionNode(Node):
             cam_x=float(p('cam_x').value),
             cam_y=float(p('cam_y').value),
             cam_yaw=math.radians(float(p('cam_yaw_deg').value)),
+            cam_z=float(p('cam_z').value),
             assoc_tol=float(p('assoc_tol').value),
             assoc_window=int(p('assoc_window').value),
-            persist_frames=int(p('persist_frames').value))
+            persist_frames=int(p('persist_frames').value),
+            label_strip=math.radians(float(p('label_strip_deg').value)),
+            label_fraction=float(p('label_fraction').value),
+            label_max_range=float(p('label_max_range').value))
+        self.PITCH_DEG = float(p('pitch_deg').value)
         self.fuser = ScanFuser(self.params)
 
         # What the node remembers between scans:
         self.speed = 0.0                      # forward speed from odometry (m/s)
-        self.box_scan: LaserScan | None = None
-        self.box_time: Time | None = None     # arrival time of the latest box scan
+        self.camera_info: CameraInfo | None = None   # colour intrinsics (full resolution)
+        self.mask_counts: np.ndarray | None = None   # column_counts() of the latest box mask
+        self.mask_cam: CameraModel | None = None     # intrinsics at the mask's resolution
+        self.mask_stamp = 0.0                 # when the mask's colour frame was taken (s)
+        self.mask_time: Time | None = None    # arrival time of the latest box mask
         self.depth_scan: LaserScan | None = None
         self.depth_time: Time | None = None
         self.used_stamps = None               # camera stamps used on the previous LiDAR scan
@@ -95,7 +116,9 @@ class FusionNode(Node):
 
         # create subscribers and publishers
         self.create_subscription(LaserScan, 'scan', self.lidar_callback, 10)
-        self.create_subscription(LaserScan, 'camera_box_scan', self.box_callback, 10)
+        self.create_subscription(Image, 'camera_box_mask', self.mask_callback, 10)
+        self.create_subscription(CameraInfo, str(p('color_info_topic').value),
+                                 self.info_callback, qos_profile_sensor_data)
         self.create_subscription(LaserScan, 'depth_scan', self.depth_callback, 10)
         self.create_subscription(Odometry, 'ego_racecar/odom', self.odom_callback, 10)
 
@@ -111,10 +134,36 @@ class FusionNode(Node):
         """Store the forward speed (abs: the car's odometry can read negative going forward)."""
         self.speed = abs(msg.twist.twist.linear.x)
 
-    def box_callback(self, msg: LaserScan) -> None:
-        """Store the latest camera box scan and when it arrived."""
-        self.box_scan = msg
-        self.box_time = self.get_clock().now()
+    def info_callback(self, msg: CameraInfo) -> None:
+        """Store the colour camera's intrinsics (needed to project LiDAR points)."""
+        self.camera_info = msg
+
+    def mask_callback(self, msg: Image) -> None:
+        """
+        Store the latest box mask, ready for looking up LiDAR points in it.
+
+        The mask comes from camera_scan_node at a reduced resolution (every mask_step-th
+        pixel), so the intrinsics are scaled down by the same factor.
+
+        Args:
+            msg (Image): mono8 mask, non-zero on cardboard pixels, stamped as its colour frame.
+        """
+        try:
+            info = self.camera_info
+            if info is None or info.width <= 0 or msg.width <= 0 or msg.height <= 0:
+                return                        # no intrinsics yet: LiDAR only until they arrive
+            mask = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+            mask = mask.reshape(msg.height, msg.step)[:, :msg.width]
+            scale = msg.width / float(info.width)
+            self.mask_cam = CameraModel(
+                fx=info.k[0] * scale, fy=info.k[4] * scale, cx=info.k[2] * scale,
+                cy=info.k[5] * scale, width=int(msg.width), height_px=int(msg.height),
+                mount_height=0.0, pitch_rad=math.radians(self.PITCH_DEG))
+            self.mask_counts = column_counts(mask)
+            self.mask_stamp = stamp_seconds(msg.header.stamp)
+            self.mask_time = self.get_clock().now()
+        except Exception as exc:
+            self.get_logger().error(f'box mask failed: {exc}', throttle_duration_sec=2.0)
 
     def depth_callback(self, msg: LaserScan) -> None:
         """Store the latest depth scan and when it arrived."""
@@ -135,14 +184,27 @@ class FusionNode(Node):
             return False
         return (self.get_clock().now() - arrival).nanoseconds * 1e-9 <= self.CAMERA_TIMEOUT
 
-    def camera_points(self, cam_scan: LaserScan, lidar: LaserScan, is_box: bool) -> CameraPoints:
+    def shift_since(self, camera_stamp: float, lidar: LaserScan) -> float:
         """
-        Place one camera scan's points on the LiDAR beams.
+        Distance the car drove between a camera frame and a LiDAR scan.
 
         Args:
-            cam_scan (LaserScan): Camera box scan or depth scan.
+            camera_stamp (float): When the camera frame was taken (s).
             lidar (LaserScan): The LiDAR scan being fused.
-            is_box (bool): True for the box scan, False for the depth scan.
+
+        Returns:
+            float: Odometry speed x time difference, between 0 and max_shift (m).
+        """
+        dt = stamp_seconds(lidar.header.stamp) - camera_stamp
+        return min(max(self.speed * dt, 0.0), self.MAX_SHIFT)
+
+    def camera_points(self, cam_scan: LaserScan, lidar: LaserScan) -> CameraPoints:
+        """
+        Place the depth scan's points on the LiDAR beams.
+
+        Args:
+            cam_scan (LaserScan): Depth scan.
+            lidar (LaserScan): The LiDAR scan being fused.
 
         Returns:
             CameraPoints: Beam index and range of each point in the LiDAR frame.
@@ -151,13 +213,29 @@ class FusionNode(Node):
                               cam_scan.range_max)
 
         # the car drove forward between the camera frame and this LiDAR scan
-        dt = stamp_seconds(lidar.header.stamp) - stamp_seconds(cam_scan.header.stamp)
-        shift = min(max(self.speed * dt, 0.0), self.MAX_SHIFT)
+        shift = self.shift_since(stamp_seconds(cam_scan.header.stamp), lidar)
 
         xl, yl = camera_to_lidar(x, y, self.params, shift)
         beams, ranges = points_to_beams(xl, yl, lidar.angle_min, lidar.angle_increment,
                                         len(lidar.ranges))
-        return CameraPoints(beams=beams, ranges=ranges, is_box=is_box)
+        return CameraPoints(beams=beams, ranges=ranges)
+
+    def label_boxes(self, lidar: LaserScan) -> np.ndarray | None:
+        """
+        Look up every LiDAR return in the latest box mask.
+
+        Args:
+            lidar (LaserScan): The LiDAR scan being fused.
+
+        Returns:
+            np.ndarray | None: Per beam, True if its return is on a cardboard box; None if
+            there is no fresh mask (camera off, stale, or no camera_info yet).
+        """
+        if self.mask_counts is None or self.mask_cam is None or not self.fresh(self.mask_time):
+            return None
+        ranges = clean_lidar(lidar.ranges, lidar.range_min, lidar.range_max)
+        return box_labels(ranges, lidar.angle_min, lidar.angle_increment, self.mask_counts,
+                          self.mask_cam, self.params, self.shift_since(self.mask_stamp, lidar))
 
     def make_scan(self, template: LaserScan, ranges) -> LaserScan:
         """
@@ -203,9 +281,9 @@ class FusionNode(Node):
         """
         Fuse the latest camera scans into one LiDAR scan and publish the result.
 
-        a. gathers the fresh camera scans
-        b. places their points on the LiDAR beams
-        c. fuses them into the scan
+        a. looks up the LiDAR returns in the fresh box mask, and gathers the fresh depth scan
+        b. places the depth points on the LiDAR beams
+        c. fuses both into the scan
         d. publishes the fused scan, the obstacle scan and the mode
 
         Error Handling:
@@ -216,30 +294,29 @@ class FusionNode(Node):
             msg (LaserScan): Scan from the LiDAR.
         """
         try:
-            # a. the camera scans that are recent enough to trust
+            # a. the camera data that is recent enough to trust
+            labels = None
             sources = []
             stamps = []
             if self.USE_CAMERA:
-                if self.box_scan is not None and self.fresh(self.box_time):
-                    sources.append(self.camera_points(self.box_scan, msg, is_box=True))
-                    stamps.append(stamp_seconds(self.box_scan.header.stamp))
+                labels = self.label_boxes(msg)
                 if (self.USE_DEPTH and self.depth_scan is not None
                         and self.fresh(self.depth_time)):
-                    sources.append(self.camera_points(self.depth_scan, msg, is_box=False))
+                    sources.append(self.camera_points(self.depth_scan, msg))
                     stamps.append(stamp_seconds(self.depth_scan.header.stamp))
 
-            # persistence only counts camera frames not used on an earlier LiDAR scan
+            # persistence only counts depth frames not used on an earlier LiDAR scan
             new_frame = bool(stamps) and stamps != self.used_stamps
             self.used_stamps = stamps
 
             # b./c. fuse
             fused, obstacle = self.fuser.fuse(msg.ranges, msg.range_min, msg.range_max,
-                                              sources, new_frame)
+                                              sources, new_frame, labels)
 
             # d. publish
             self.fused_publisher.publish(self.make_scan(msg, fused))
             self.obstacle_publisher.publish(self.make_scan(msg, obstacle))
-            self.set_mode('fused' if sources else 'lidar_only')
+            self.set_mode('fused' if sources or labels is not None else 'lidar_only')
 
             # e. say where the camera changed the scan (each log line has its own call site)
             angles = msg.angle_min + np.arange(len(msg.ranges)) * msg.angle_increment

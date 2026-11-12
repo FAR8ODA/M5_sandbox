@@ -142,6 +142,25 @@ class CounterTest(unittest.TestCase):
         laps = self.feed([0.95, 0.95, 0.95, 0.5])
         self.assertTrue(laps[-1])
 
+    def test_arms_on_distance_when_the_score_stays_high(self):
+        # between solid walls the LiDAR score never drops below rearm_threshold (0.64 at its
+        # lowest in the closed-loop simulator), so the score alone never armed the counter
+        self.node.phase = 'search'
+        self.node.last_odom_time = 0.0
+        self.node.distance = 2.0                              # under half the 5 m lap gate
+        self.node.update_counter(0.65, 0.0)
+        self.assertFalse(self.node.armed)
+        self.node.distance = 6.0                              # past the gate
+        laps = self.feed([0.65, 0.9, 0.9, 0.9, 0.95, 0.9])
+        self.assertTrue(self.node.armed or any(laps))
+        self.assertEqual(sum(laps), 1)
+
+    def test_no_odometry_still_needs_the_score_drop(self):
+        self.node.phase = 'search'
+        self.node.distance = 100.0                            # meaningless without odometry
+        self.assertFalse(any(self.feed([0.65, 0.9, 0.9, 0.9, 0.95, 0.9])))
+        self.assertFalse(self.node.armed)
+
     def test_full_run_on_lidar_only(self):
         node = self.node
         t = 0.0

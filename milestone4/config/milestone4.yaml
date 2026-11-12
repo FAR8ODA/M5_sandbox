@@ -30,16 +30,22 @@
     scan_timeout: 0.15        # fused scan older than this: use the raw /scan (s)
     odom_timeout: 0.5         # odometry older than this: use the commanded speed (s)
 
-    # Camera mounting (camera_scan_node, depth_scan_node)
-    mount_height: 0.187       # camera height above the floor (m)
+    # Camera mounting (camera_scan_node, depth_scan_node, fusion_node)
+    mount_height: 0.187       # camera height above the floor (m); 0.15-0.22 on our car
     pitch_deg: -5.3           # camera pitch (degrees, positive = tilted down)
+    color_info_topic: /camera/camera/color/camera_info   # colour intrinsics
 
 gap_follow_node:
   ros__parameters:
     # Speed
     max_speed: 1.0            # top speed on a clear straight; keep equal to safety drive_speed (m/s)
     min_speed: 0.35           # lowest request unless the braking limit is lower (m/s)
-    pass_speed: 0.55          # speed while passing a camera-confirmed box (m/s)
+    # speed cap while passing a camera-confirmed box (m/s). 0.55 held the car at 0.55 m/s
+    # for most of a lap with boxes on the straights (the cap starts 1.5 m before each box
+    # and the next box is seen from the turns); the braking and cornering limits already
+    # slow it where needed. 1.0 set off AEB with a lagging servo and flickering labels
+    # (test_servo_lag_and_flickering_box_labels); 0.9 passed, 0.8 keeps a margin.
+    pass_speed: 0.8
     a_lat: 2.5                # sideways grip for the cornering limit (m/s^2)
     a_accel: 2.0              # how fast the requested speed may rise (m/s^2)
     plan_factor: 2.5          # planner keeps TTC >= this x the TTC needed to stop
@@ -90,8 +96,16 @@ fusion_node:
     cam_x: 0.0                # camera ahead of the LiDAR (m); tune in rviz
     cam_y: 0.0                # camera left of the LiDAR (m)
     cam_yaw_deg: 0.0          # camera heading offset (degrees, left positive)
-    assoc_tol: 0.25           # camera and LiDAR ranges this close are one object (m)
-    assoc_window: 4           # LiDAR beams searched each side of a camera point
+    cam_z: 0.06               # camera lens above the LiDAR's scan plane (m); 0.0-0.10 works
+
+    # Box labels: each LiDAR return is projected to its pixel in /camera_box_mask
+    label_strip_deg: 2.0      # rows checked above and below that pixel, as an angle (degrees)
+    label_fraction: 0.5       # share of those rows that must be cardboard (0-1)
+    label_max_range: 4.0      # farther LiDAR returns are not labelled (m)
+
+    # Depth scan (use_depth:=true)
+    assoc_tol: 0.25           # depth and LiDAR ranges this close are one object (m)
+    assoc_window: 4           # LiDAR beams searched each side of a depth point
     persist_frames: 3         # frames in a row before a depth-only point is trusted
 
 lap_counter_node:
@@ -99,7 +113,8 @@ lap_counter_node:
     num_laps: 3               # laps before the latched stop
     color_topic: /camera/camera/color/image_raw
     similarity_threshold: 0.8 # score meaning "back at the start"
-    rearm_threshold: 0.5      # score must drop below this before the next lap
+    rearm_threshold: 0.5      # score must drop below this before the next lap ...
+    rearm_distance_fraction: 0.5  # ... or the car has driven this x the lap gate
     camera_weight: 0.5        # weight of the camera similarity
     lidar_weight: 0.5         # weight of the LiDAR similarity
     min_lap_distance: 15.0    # shortest lap, about 3/4 of a lap (m)
@@ -110,9 +125,10 @@ lap_counter_node:
 camera_scan_node:
   ros__parameters:
     color_topic: /camera/camera/color/image_raw
-    color_info_topic: /camera/camera/color/camera_info
-    scan_topic: camera_scan
-    box_scan_topic: camera_box_scan
+    box_mask_topic: camera_box_mask   # cardboard pixels, for the fusion node
+    mask_step: 2              # the mask keeps every n-th pixel (smaller message)
+    scan_topic: camera_scan           # walls + boxes, built only while subscribed (rviz)
+    box_scan_topic: camera_box_scan   # boxes only, built only while subscribed (rviz)
     scan_frame: camera_link
     num_beams: 180
     range_min: 0.05           # (m)
