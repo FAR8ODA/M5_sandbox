@@ -38,7 +38,8 @@ New in Milestone 4:
     Fail safe: any error inside a callback brakes instead of stopping the node.
     Stop on exit: on Ctrl+C (or any other exit) the node sends a zero-speed /drive
         command before it ends, so the car is never left with a moving last command.
-    Quiet logs: one message per state change, warnings throttled.
+    Logs: one line, "AEB engaged: <reason>", when the car is stopped for good (AEB, a
+        blocked path, or the lap counter's stop request). The mode is on /safety/state.
     Debug topic: every drive request and what was done with it is published on safety/debug
         as one line of JSON (only while something is subscribed, e.g. ros2 bag record).
 """
@@ -296,7 +297,6 @@ class SafetyNode(Node):
         self.TRACK_FOV = math.radians(90.0)  # ... and within this angle either side
         self.FACING_SPAN = math.radians(2.5)  # surface slope from the beams this far either side
         self.MAX_INCIDENCE = math.radians(45.0)  # steeper surfaces: no obstacle speed
-        self.LAG_WARNING = 0.15         # warn when scans arrive this late (s)
         self.MIN_CLOSING = float(p('min_closing').value)
         self.BLOCKED_TIME = float(p('blocked_time').value)
         self.SCAN_TIMEOUT = float(p('scan_timeout').value)
@@ -313,7 +313,6 @@ class SafetyNode(Node):
         self.safety_mode = 'normal'                     # normal, slow, stale, aeb or stopped
         self.last_request_time: Time | None = None      # when the last drive request arrived
         self.blocked_since: Time | None = None          # when the car was first held at 0 m/s
-        self.odom_warned = False                        # odometry-missing warning logged
         self.last_check = (math.inf, math.inf, math.inf, math.inf, 0.0)  # path, cap, ttc,
         #                                                                 needed, obstacle speed
         self.sources = {'fused': ScanSource('fused', self.PERSIST_SCANS),
@@ -340,11 +339,6 @@ class SafetyNode(Node):
         # watchdog: brakes when inputs go stale, even if no callback fires
         self.watchdog_timer = self.create_timer(self.WATCHDOG_PERIOD, self.watchdog_callback)
 
-        self.get_logger().info(
-            f'safety_node started: drive speed {self.drive_speed} m/s, '
-            f'a_brake {self.A_BRAKE} m/s^2, TTC margin {self.TTC_MARGIN} s, '
-            f'obstacle tracking {"on" if self.TRACK_OBSTACLES else "off"}')
-
     # Inputs
 
     def odom_callback(self, msg: Odometry) -> None:
@@ -359,9 +353,6 @@ class SafetyNode(Node):
         self.current_yaw_rate = self.yaw_rate()
         self.advance_pose(self.current_speed, self.current_yaw_rate,
                           self.msg_time(msg.header.stamp))
-        if self.odom_warned:
-            self.get_logger().info('odometry back')
-            self.odom_warned = False
 
     def measured_speed(self) -> float:
         """
@@ -372,9 +363,6 @@ class SafetyNode(Node):
         """
         if self.age_seconds(self.last_odom_time) <= self.ODOM_TIMEOUT:
             return self.current_speed
-        if not self.odom_warned:
-            self.get_logger().warn('odometry missing or stale: using the commanded speed')
-            self.odom_warned = True
         return self.last_command_speed
 
     def yaw_rate(self) -> float:
@@ -503,9 +491,6 @@ class SafetyNode(Node):
                 self.advance_pose(self.measured_speed(), self.yaw_rate(), now_s)  # no odometry
             # the scan is matched with where the car was when it was taken, not on arrival
             source.tracker.add(taken, source.x[finite], source.y[finite], self.pose_at(taken))
-            if source.lag > self.LAG_WARNING:
-                self.get_logger().warn(f'scans arrive {source.lag:.2f} s late (CPU overloaded?)',
-                                       throttle_duration_sec=2.0)
 
             # obstacle speeds: once per scan, for the scan in use only (drive requests reuse
             # them). An obstacle speed only counts once it has been seen in every recent scan,
@@ -718,8 +703,9 @@ class SafetyNode(Node):
         self.last_request_time = self.get_clock().now()
 
         # a negative speed requests a permanent stop (lap counter done)
-        if msg.drive.speed < 0.0 and not self.is_latched():
-            self.set_mode('stopped', 'latched stop requested (laps done)')
+        if msg.drive.speed < 0.0:
+            self.latch('stopped', 'stop requested (laps done)')
+            return
 
         # latched: once stopped, stay stopped until the node restarts
         if self.is_latched():
@@ -731,7 +717,7 @@ class SafetyNode(Node):
         if source is None or not self.inputs_fresh():
             return
         if self.safety_mode == 'stale':
-            self.set_mode('normal', 'inputs fresh again: resuming')
+            self.set_mode('normal')                     # inputs fresh again: resume
 
         speed = self.drive_speed
         if msg.drive.speed > 0.0:
@@ -747,9 +733,9 @@ class SafetyNode(Node):
         # soft stage: slow down so the car can still stop
         if cap < speed:
             speed = max(cap, 0.0)
-            self.set_mode('slow', 'slowing for an obstacle on the path', throttle=2.0)
+            self.set_mode('slow')
         elif self.safety_mode == 'slow':
-            self.set_mode('normal', 'path clear: full speed', throttle=2.0)
+            self.set_mode('normal')
 
         # held at 0 m/s by an obstacle for blocked_time: the path is blocked, stop for good
         now = self.get_clock().now()
@@ -795,16 +781,13 @@ class SafetyNode(Node):
             self.fail_safe('watchdog', exc)
 
     def check_inputs(self) -> None:
-        """Brake while an input is stale; log once when the inputs go stale."""
+        """Brake while an input is stale (shown on /safety/state; it resumes, so not logged)."""
         self.publish_state()
         if self.inputs_fresh():
             return
 
         if self.safety_mode in ('normal', 'slow'):
-            request_age = self.age_seconds(self.last_request_time)
-            scan_age = self.age_seconds(self.sources['fused'].time)
-            self.set_mode('stale', f'inputs stale (request {request_age:.2f}s, '
-                                   f'fused scan {scan_age:.2f}s): braking', warn=True)
+            self.set_mode('stale')
         self.emergency_brake()
 
     # Outputs
@@ -813,28 +796,27 @@ class SafetyNode(Node):
         """Return True once AEB or a latched stop has stopped the car for good."""
         return self.safety_mode in ('aeb', 'stopped')
 
-    def set_mode(self, mode: str, message: str, warn: bool = False,
-                 throttle: float = 0.0) -> None:
+    def set_mode(self, mode: str) -> None:
         """
-        Change the safety mode, logging only when it changes.
+        Change the safety mode (published on /safety/state, not logged).
 
         Args:
-            mode (str): New mode.
-            message (str): Log message for the change.
-            warn (bool): Log as a warning instead of info.
-            throttle (float): Log at most once per this many seconds (0 = always).
+            mode (str): New mode: normal, slow or stale (latch() sets aeb and stopped).
         """
-        if mode == self.safety_mode:
-            return
         self.safety_mode = mode
-        # rclpy treats each logging line as one call site that must always use the same
-        # severity and filters (it raises ValueError otherwise), so each kind has its own line
-        if warn:
-            self.get_logger().warn(message)
-        elif throttle > 0.0:
-            self.get_logger().info(message, throttle_duration_sec=throttle)
-        else:
-            self.get_logger().info(message)
+
+    def latch(self, mode: str, reason: str) -> None:
+        """
+        Stop the car for good; the first time, log the one line this node ever logs.
+
+        Args:
+            mode (str): 'aeb' or 'stopped'.
+            reason (str): Why the car stopped, for the log.
+        """
+        if not self.is_latched():
+            self.safety_mode = mode
+            self.get_logger().error('AEB engaged: ' + reason)
+        self.emergency_brake()
 
     def fail_safe(self, where: str, exc: Exception) -> None:
         """
@@ -844,8 +826,7 @@ class SafetyNode(Node):
             where (str): Which callback failed, for the log.
             exc (Exception): The error.
         """
-        self.get_logger().error(f'safety {where} failed, braking: {exc}',
-                                throttle_duration_sec=1.0)
+        self.get_logger().error(f'safety {where} failed, braking: {exc}', once=True)
         try:
             self.emergency_brake()
         except Exception:
@@ -858,14 +839,14 @@ class SafetyNode(Node):
         Args:
             reason (str): Why AEB engaged, for the log.
         """
-        if not self.is_latched():
-            nearest, _, ttc, needed, obstacle = self.last_check
+        nearest, _, ttc, needed, obstacle = self.last_check
+        if reason == 'path blocked':
+            detail = f'held at 0 m/s for {self.BLOCKED_TIME:.1f} s, path distance {nearest:.2f} m'
+        else:
             moving = f'approaching at {obstacle:.1f} m/s' if obstacle > 0.0 else 'static'
-            self.set_mode('aeb', f'AEB engaged ({reason}): TTC {ttc:.2f} s '
-                                 f'(needs {needed:.2f} s), path distance {nearest:.2f} m, '
-                                 f'speed {self.current_speed:.2f} m/s, obstacle {moving}',
-                          warn=True)
-        self.emergency_brake()
+            detail = (f'TTC {ttc:.2f} s (needs {needed:.2f} s), path distance {nearest:.2f} m, '
+                      f'speed {self.current_speed:.2f} m/s, obstacle {moving}')
+        self.latch('aeb', f'{reason} ({detail})')
 
     def publish_state(self) -> None:
         """Publish the safety mode and the last check on /safety/state, for debugging."""
@@ -971,7 +952,7 @@ def main(args=None) -> None:
     try:
         rclpy.spin(safety_node)    # spin to handle callbacks
     except KeyboardInterrupt:
-        safety_node.get_logger().info('Ctrl+C: stopping the car before exiting')
+        pass                       # Ctrl+C: stop the car (below), then end
     finally:
         safety_node.stop_on_exit()     # zero speed on /drive, a few times
         safety_node.destroy_node()     # destroy safety node

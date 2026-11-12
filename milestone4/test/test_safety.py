@@ -216,9 +216,8 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertEqual(self.commands()[-1].drive.speed, 0.0)
         self.assertTrue(any(level == 'error' for level, _ in self.node.get_logger().records))
 
-    def test_mode_changes_log_without_crashing(self):
-        # stale (warn) -> resume (info) -> slow (throttled info) -> aeb (warn): rclpy raises
-        # if one source line logs with two severities, so each must have its own line
+    def test_only_the_aeb_is_logged(self):
+        # stale -> resume -> slow -> aeb: only the latched stop is logged, once
         clear = ros_stubs.corridor_ranges(1.0)
         self.step(0.0, clear, speed=0.0)
         self.node.watchdog_callback()
@@ -230,6 +229,11 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertEqual(self.node.safety_mode, 'slow')
         self.step(0.075, ros_stubs.add_box(clear, 0.6, -0.2, 0.2), speed=1.5)
         self.assertEqual(self.node.safety_mode, 'aeb')
+        self.step(0.1, ros_stubs.add_box(clear, 0.5, -0.2, 0.2), speed=1.5, request=(0.0, 1.0))
+        records = self.node.get_logger().records
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0][0], 'error')
+        self.assertTrue(records[0][1].startswith('AEB engaged: obstacle on the path (TTC '))
 
     def test_approaching_obstacle_brakes_while_stopped(self):
         # the car is still; an obstacle comes towards it at 2 m/s (track_obstacles:=true)
@@ -268,6 +272,8 @@ class SafetyNodeTest(unittest.TestCase):
         self.step(0.025, clear, speed=0.0, request=(0.0, 1.5))
         self.assertEqual(self.node.safety_mode, 'stopped')
         self.assertEqual(self.commands()[-1].drive.speed, 0.0)
+        self.assertEqual(self.node.get_logger().records,
+                         [('error', 'AEB engaged: stop requested (laps done)')])
 
     def test_watchdog_brakes_when_requests_stop(self):
         clear = ros_stubs.corridor_ranges(1.0)
@@ -295,6 +301,9 @@ class SafetyNodeTest(unittest.TestCase):
         for i in range(30):
             self.step(i * 0.05, blocked, speed=0.0, request=(0.0, 1.0))
         self.assertEqual(self.node.safety_mode, 'aeb')
+        records = self.node.get_logger().records
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0][1].startswith('AEB engaged: path blocked (held at 0 m/s'))
 
     def test_state_topic(self):
         self.step(0.0, ros_stubs.corridor_ranges(1.0), speed=0.0, request=(0.0, 1.0))
@@ -349,7 +358,7 @@ class ExitTest(unittest.TestCase):
         self.assertEqual(drive[0].drive.speed, 1.0)
         self.assertGreaterEqual(len(drive), 6)
         self.assertTrue(all(m.drive.speed == 0.0 for m in drive[1:]))
-        self.assertTrue(any('Ctrl+C' in m for _, m in node.get_logger().records))
+        self.assertEqual(node.get_logger().records, [])        # nothing logged on the way out
 
     def test_any_other_exit_also_stops_the_car(self):
         from milestone4 import safety_node
@@ -444,8 +453,10 @@ class ObstacleSpeedRobustnessTest(unittest.TestCase):
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 0.8, -0.2, 0.2)
         node.odom_callback(ros_stubs.make_odom(1.5))
         node.fused_scan_callback(ros_stubs.make_scan(box))
-        warnings = [m for level, m in node.get_logger().records if level == 'warn']
-        self.assertTrue(any('AEB engaged' in m and 'obstacle static' in m for m in warnings))
+        errors = [m for level, m in node.get_logger().records if level == 'error']
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith('AEB engaged: obstacle on the path'))
+        self.assertIn('obstacle static', errors[0])
 
 
 class FacingGateTest(unittest.TestCase):
@@ -481,7 +492,6 @@ class FacingGateTest(unittest.TestCase):
     def test_tracking_is_off_by_default(self):
         node = SafetyNode()
         self.assertFalse(node.TRACK_OBSTACLES)
-        self.assertTrue(any('obstacle tracking off' in m for _, m in node.get_logger().records))
         walls = ros_stubs.corridor_ranges(1.0)
         for i in range(30):                                    # a box comes at a stopped car
             t = i * 0.025
@@ -589,9 +599,8 @@ class ScanLagTest(unittest.TestCase):
         self.node.fused_scan_callback(ros_stubs.make_scan(ros_stubs.corridor_ranges(1.0), t=1.0))
         self.node.watchdog_callback()
         state = self.node.publishers_by_topic['safety/state'].messages[-1].data
-        self.assertIn('lag=300ms', state)
-        warnings = [m for level, m in self.node.get_logger().records if level == 'warn']
-        self.assertTrue(any('0.30 s late' in m for m in warnings))
+        self.assertIn('lag=300ms', state)                     # on the topic, not in the log
+        self.assertEqual(self.node.get_logger().records, [])
 
     def test_drive_requests_reuse_the_obstacle_speeds(self):
         calls = []
