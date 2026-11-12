@@ -305,14 +305,12 @@ class FusionNodeTest(unittest.TestCase):
         obstacle = np.array(self.last(node, 'obstacle_scan').ranges)
         self.assertFalse(np.isfinite(obstacle).any())         # but it is not a box
         self.assertEqual(self.last(node, 'fusion/mode').data, 'fused')
-        logs = [m for _, m in node.get_logger().records]
-        self.assertTrue(any('depth camera adds an object at 0.8 m, 0 deg straight ahead' in m
-                            for m in logs))
+        self.assertEqual(node.get_logger().records, [])       # shown in /fused_scan, not logged
 
     def test_depth_is_off_by_default(self):
         node, ahead = self.depth_run()
         self.assertGreater(ahead.min(), 5.0)                  # LiDAR only: nothing added
-        self.assertTrue(any('depth off' in m for _, m in node.get_logger().records))
+        self.assertFalse(node.USE_DEPTH)
 
     def test_fresh_box_mask_labels_lidar_returns(self):
         node = fusion_node.FusionNode()
@@ -326,9 +324,9 @@ class FusionNodeTest(unittest.TestCase):
         obstacle = np.array(self.last(node, 'obstacle_scan').ranges)
         self.assertTrue(np.allclose(self.last(node, 'fused_scan').ranges, lidar))
         self.assertGreater(int(np.isfinite(obstacle).sum()), 40)
+        self.assertAlmostEqual(float(obstacle[np.isfinite(obstacle)].min()), 1.5, delta=0.05)
         self.assertEqual(self.last(node, 'fusion/mode').data, 'fused')
-        logs = [m for _, m in node.get_logger().records]
-        self.assertTrue(any(m.startswith('box label at 1.5 m') for m in logs))
+        self.assertEqual(node.get_logger().records, [])       # shown in /obstacle_scan
 
     def test_box_mask_follows_the_car_between_frames(self):
         # the mask shows the box 1.5 m ahead; 0.1 s later the car (2 m/s) is 0.2 m closer,

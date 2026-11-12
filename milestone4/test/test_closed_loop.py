@@ -32,6 +32,14 @@ class ClosedLoopTest(unittest.TestCase):
         self.assertEqual(result['laps'], 3)
         self.assertEqual(result['mode'], 'stopped')            # latched stop, not AEB
         self.assertAlmostEqual(result['distance'] / 3, self.lap, delta=0.2 * self.lap)
+        # the whole terminal output: one line per lap, then the safety node's stop line
+        logs = result['logs']
+        self.assertEqual(logs['fusion'], [])
+        self.assertEqual(logs['planner'], [])
+        self.assertEqual([m.split(' (')[0] for _, m in logs['laps']],
+                         ['Lap 1/3', 'Lap 2/3', 'Lap 3/3'])
+        self.assertTrue(logs['laps'][-1][1].endswith(': stopping'))
+        self.assertEqual(logs['safety'], [('error', 'AEB engaged: stop requested (laps done)')])
 
     def test_variable_speed_is_faster_and_stays_inside_the_safety_band(self):
         # the old piecewise-linear speed averaged 0.77 m/s here with the same 1.5 m/s cap
@@ -154,8 +162,7 @@ class ClosedLoopTest(unittest.TestCase):
             self.assert_no_crash(result)
             self.assertEqual(result['laps'], 2)
             self.assertEqual(result['mode'], 'stopped')        # the lap stop, not AEB
-            toggles = sum('passing a box' in m for _, m in result['logs']['planner'])
-            self.assertLess(toggles, 20)                       # was over 100 without debounce
+            self.assertLess(result['passing_starts'], 20)      # was over 100 without debounce
 
     def test_depth_camera_avoids_what_the_lidar_cannot_see(self):
         # a low box below the LiDAR's scan plane, 2 m ahead on the left half of the lane:

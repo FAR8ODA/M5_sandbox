@@ -205,6 +205,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
     jitter, last_steer = [], None
     obstacle_peak = 0.0                                    # largest persistent obstacle speed
     distance, closest, top_speed, trace = 0.0, math.inf, 0.0, []
+    passing, passing_starts = False, 0                     # planner passing a box
     n_requests = n_stops = 0
     t = 0.0
     while t < max_time:
@@ -235,6 +236,8 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
             planner.obstacle_callback(obstacles)
             planner.fused_callback(fused)
             planner.raw_callback(scan)
+            passing_starts += planner.passing and not passing
+            passing = planner.passing
             if scan_lag is None:
                 safety.fused_scan_callback(fused)
                 safety.raw_scan_callback(scan)
@@ -312,6 +315,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
             'steer_jitter': float(np.mean(jitter)) if jitter else 0.0,
             'closest': closest, 'top_speed': top_speed, 'trace': trace,
             'body_clearance': body_clearance, 'body_clearance_speed': body_clearance_speed,
+            'passing_starts': passing_starts,
             'logs': {name: node.get_logger().records for name, node in
                      (('fusion', fusion), ('planner', planner), ('safety', safety),
                       ('laps', laps))}}

@@ -16,9 +16,8 @@ The fusion node:
            (colour only labels: it cannot measure height, so it never adds)
     d. publishes /fused_scan (LiDAR geometry, drop-in for /scan), /obstacle_scan (beams the
        colour camera confirmed as boxes, inf elsewhere) and /fusion/mode ('fused' or
-       'lidar_only')
-    e. logs (every 2 s at most) where a box label or a depth-only object is, so a false one
-       can be traced to its source on the car
+       'lidar_only'); a false box label or depth object can be traced on these in rviz
+       (this node logs nothing, only an unexpected error, once)
 
 The depth scan is off by default (use_depth:=true turns it on): if the camera pitch or
 height is slightly off, the floor gets past the floor rejection and appears as obstacles.
@@ -112,7 +111,6 @@ class FusionNode(Node):
         self.depth_scan: LaserScan | None = None
         self.depth_time: Time | None = None
         self.used_stamps = None               # camera stamps used on the previous LiDAR scan
-        self.mode = None                      # 'fused' or 'lidar_only'
 
         # create subscribers and publishers
         self.create_subscription(LaserScan, 'scan', self.lidar_callback, 10)
@@ -125,10 +123,6 @@ class FusionNode(Node):
         self.fused_publisher = self.create_publisher(LaserScan, 'fused_scan', 10)
         self.obstacle_publisher = self.create_publisher(LaserScan, 'obstacle_scan', 10)
         self.mode_publisher = self.create_publisher(String, 'fusion/mode', 10)
-
-        self.get_logger().info(
-            f'fusion_node started: camera {"on" if self.USE_CAMERA else "off"}, '
-            f'depth {"on" if self.USE_DEPTH else "off"}')
 
     def odom_callback(self, msg: Odometry) -> None:
         """Store the forward speed (abs: the car's odometry can read negative going forward)."""
@@ -163,7 +157,7 @@ class FusionNode(Node):
             self.mask_stamp = stamp_seconds(msg.header.stamp)
             self.mask_time = self.get_clock().now()
         except Exception as exc:
-            self.get_logger().error(f'box mask failed: {exc}', throttle_duration_sec=2.0)
+            self.get_logger().error(f'box mask failed: {exc}', once=True)
 
     def depth_callback(self, msg: LaserScan) -> None:
         """Store the latest depth scan and when it arrived."""
@@ -262,19 +256,11 @@ class FusionNode(Node):
 
     def set_mode(self, mode: str) -> None:
         """
-        Publish the fusion mode and log when it changes.
+        Publish the fusion mode on /fusion/mode (it is not logged).
 
         Args:
             mode (str): 'fused' or 'lidar_only'.
         """
-        if mode != self.mode:
-            if mode == 'fused':
-                self.get_logger().info('camera scans arriving: fusing camera with LiDAR')
-            elif self.USE_CAMERA:
-                self.get_logger().warn('camera scans stale or missing: driving on LiDAR only')
-            else:
-                self.get_logger().info('camera disabled: driving on LiDAR only')
-            self.mode = mode
         self.mode_publisher.publish(String(data=mode))
 
     def lidar_callback(self, msg: LaserScan) -> None:
@@ -318,40 +304,9 @@ class FusionNode(Node):
             self.obstacle_publisher.publish(self.make_scan(msg, obstacle))
             self.set_mode('fused' if sources or labels is not None else 'lidar_only')
 
-            # e. say where the camera changed the scan (each log line has its own call site)
-            angles = msg.angle_min + np.arange(len(msg.ranges)) * msg.angle_increment
-            boxes = np.isfinite(obstacle)
-            if boxes.any():
-                i = int(np.argmin(np.where(boxes, obstacle, np.inf)))
-                self.get_logger().info(f'box label at {where(obstacle[i], angles[i])}',
-                                       throttle_duration_sec=2.0)
-            added = self.fuser.trusted
-            if added is not None and added.size == fused.size and added.any():
-                i = int(np.argmin(np.where(added, fused, np.inf)))
-                self.get_logger().info(
-                    f'depth camera adds an object at {where(fused[i], angles[i])}',
-                    throttle_duration_sec=2.0)
-
         except Exception as exc:
-            self.get_logger().error(f'fusion failed, passing LiDAR through: {exc}',
-                                    throttle_duration_sec=1.0)
+            self.get_logger().error(f'fusion failed, passing LiDAR through: {exc}', once=True)
             self.fused_publisher.publish(msg)
-
-
-def where(distance: float, angle: float) -> str:
-    """
-    Describe where a point is, for the logs, e.g. '1.4 m, 20 deg right'.
-
-    Args:
-        distance (float): Range (m).
-        angle (float): Bearing (rad, positive is left).
-
-    Returns:
-        str: Distance and side.
-    """
-    degrees = math.degrees(float(angle))
-    side = 'straight ahead' if abs(degrees) < 2.0 else ('left' if degrees > 0.0 else 'right')
-    return f'{float(distance):.1f} m, {abs(degrees):.0f} deg {side}'
 
 
 def main(args=None) -> None:

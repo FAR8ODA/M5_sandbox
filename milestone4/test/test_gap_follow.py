@@ -294,20 +294,24 @@ class BoxLabelDebounceTest(unittest.TestCase):
         ros_stubs.CLOCK.seconds = 0.6
         self.assertFalse(self.node.box_ahead(r, a, np.zeros(r.size, bool)))  # 0.5 s later
 
-    def test_flickering_labels_log_once(self):
+    def test_flickering_labels_start_one_pass(self):
         # labels on in every other scan for a second, as in the car log
         scan = ros_stubs.make_scan(ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 1.2,
                                                      -0.2, 0.2))
+        passing = []
         for i in range(40):
             t = i * 0.025
             self.label(t, i % 2 == 0)
             self.node.fused_callback(scan)
-        lines = [m for _, m in self.node.get_logger().records if 'passing a box' in m]
-        self.assertEqual(len(lines), 1)
-        self.assertIn('passing a box: slowing down (1.2 m ahead', lines[0])
+            passing.append(self.node.passing)
+        self.assertEqual(sum(now and not before for before, now
+                             in zip([False] + passing, passing)), 1)
+        self.assertTrue(self.node.box_where.startswith('1.2 m ahead'))
+        self.assertEqual(self.node.get_logger().records, [])   # nothing logged
 
-    def test_passing_log_says_where_the_box_is(self):
-        # with no box on the track the car slowed for "boxes" all lap: the log must say where
+    def test_debug_topic_says_where_the_box_is(self):
+        # with no box on the track the car slowed for "boxes" all lap: gap_follow/debug must
+        # say where (the box field while passing)
         a = ros_stubs.lidar_angles()
         r = np.full(a.size, 3.0)
         boxes = (a > math.radians(30.0)) & (a < math.radians(40.0))

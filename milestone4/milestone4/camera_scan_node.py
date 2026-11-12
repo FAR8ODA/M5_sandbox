@@ -95,21 +95,16 @@ class CameraScanNode(Node):
             LaserScan, str(self.get_parameter('box_scan_topic').value), 10)
         self.debug_publisher = self.create_publisher(Image, f'{scan_topic}/debug', 1)
 
-        self.get_logger().info('camera_scan_node started; waiting for camera_info')
-
     def color_info_callback(self, msg: CameraInfo) -> None:
         """Store the colour camera model. Rebuilt on every camera_info message.
 
         Args:
             msg (CameraInfo): Colour camera intrinsics.
         """
-        first = self.color_cam is None
         self.color_cam = CameraModel.from_k(
             msg.k, msg.width, msg.height,
             float(self.get_parameter('mount_height').value),
             float(self.get_parameter('pitch_deg').value))
-        if first:
-            self.get_logger().info(f'camera_info received ({msg.width}x{msg.height})')
 
     def mask_params(self) -> MaskParams:
         """Read the current colour thresholds from the parameters.
@@ -224,7 +219,7 @@ class CameraScanNode(Node):
 
         except Exception as exc:
             # Publishing nothing makes the fusion node fall back to LiDAR only.
-            self.get_logger().error(f'camera scan failed: {exc}', throttle_duration_sec=2.0)
+            self.get_logger().error(f'camera scan failed: {exc}', once=True)
 
 
 def main(args=None) -> None:

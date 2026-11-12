@@ -78,8 +78,6 @@ class DepthScanNode(Node):
             10
         )
 
-        self.get_logger().info('depth_scan_node started; waiting for camera_info')
-
     def info_callback(self, msg: CameraInfo) -> None:
         """Store fx, fy, cx and cy from the depth camera intrinsics.
 
@@ -144,7 +142,7 @@ class DepthScanNode(Node):
 
         except Exception as exc:
             # Publishing nothing makes the fusion node ignore depth until it recovers.
-            self.get_logger().error(f'depth scan failed: {exc}', throttle_duration_sec=2.0)
+            self.get_logger().error(f'depth scan failed: {exc}', once=True)
 
 
 def main(args=None) -> None:

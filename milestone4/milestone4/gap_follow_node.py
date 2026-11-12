@@ -30,6 +30,7 @@ This is received by safety_node, which caps the speed and applies AEB.
 For debugging, every decision is also published on gap_follow/debug as one line of JSON
 (only while something is subscribed, e.g. ros2 bag record): the target, the steering before
 and after the side check, the free distance, each speed limit and which one set the speed.
+This node logs nothing (only an unexpected error, once).
 """
 
 # include needed imports
@@ -64,7 +65,7 @@ from std_msgs.msg import String
 
 def describe(distance: float, angle: float) -> str:
     """
-    Describe where a point is, for the logs, e.g. '0.9 m ahead, 35 deg left'.
+    Describe where a point is, for gap_follow/debug, e.g. '0.9 m ahead, 35 deg left'.
 
     Args:
         distance (float): Range (m).
@@ -205,9 +206,8 @@ class GapFollowNode(Node):
         self.box_until: np.ndarray | None = None   # per beam: box label held until (s)
         self.pass_until = -math.inf     # stay in passing mode until this time (s)
         self.fused_time: Time | None = None        # when the last fused scan arrived
-        self.passing = False            # slowing for a confirmed box (for logging changes)
-        self.box_where = ''             # where the nearest box ahead is, for the log
-        self.source = None              # 'fused' or 'raw' (for logging changes)
+        self.passing = False            # slowing for a confirmed box (on the last scan)
+        self.box_where = ''             # where the nearest box ahead was, for gap_follow/debug
 
         # create subscribers and publisher
         self.publisher_ = self.create_publisher(
@@ -220,10 +220,6 @@ class GapFollowNode(Node):
         self.create_subscription(LaserScan, 'scan', self.raw_callback, 10)
         self.create_subscription(LaserScan, 'obstacle_scan', self.obstacle_callback, 10)
         self.create_subscription(Odometry, 'ego_racecar/odom', self.odom_callback, 10)
-
-        self.get_logger().info(
-            f'gap_follow_node started: max speed {self.MAX_SPEED} m/s, '
-            f'lookahead {self.LOOKAHEAD} m, gain {self.STEERING_GAIN}')
 
     # Inputs
 
@@ -670,7 +666,8 @@ class GapFollowNode(Node):
         looked at it, m), v (measured speed, m/s), lim_max / lim_brake / lim_corner /
         lim_pass (each speed limit, m/s; null = no limit), limit (which one set the speed:
         max, brake, corner, pass, min = lifted to min_speed, ramp = still accelerating),
-        speed (requested, m/s), passing, boxes (beams labelled as a box).
+        speed (requested, m/s), passing, box (while passing: where the nearest confirmed box
+        ahead was, e.g. '0.9 m ahead, 30 deg left'), boxes (beams labelled as a box).
 
         Args:
             msg: the scan that was processed
@@ -706,6 +703,7 @@ class GapFollowNode(Node):
             free=free, free_straight=straight, v=self.lookahead_speed(),
             lim_max=limits['max'], lim_brake=limits['brake'], lim_corner=limits['corner'],
             lim_pass=limits['pass'], limit=limit, speed=speed, passing=bool(passing),
+            box=self.box_where if passing else None,
             boxes=int(np.count_nonzero(self.box_beams(len(msg.ranges)))))))
 
     # Processes each scan to calculate and publish the drive request.
@@ -724,16 +722,9 @@ class GapFollowNode(Node):
 
         Args:
             msg: fused (or raw) LaserScan
-            source: 'fused' or 'raw', for logging which scan is used
+            source: 'fused' or 'raw', for gap_follow/debug
         """
         try:
-            if source != self.source:
-                if source == 'raw':
-                    self.get_logger().warn('fused scan stale: driving on the raw LiDAR scan')
-                elif self.source is not None:
-                    self.get_logger().info('fused scan back: driving on the fused scan')
-                self.source = source
-
             # a. preprocess the scan
             ranges, angles = self.preprocess_scan(msg)
             if ranges.size < 2:
@@ -746,8 +737,7 @@ class GapFollowNode(Node):
             # c. find the target and steer to it
             index = self.find_target(extended, angles)
             if index is None:
-                self.get_logger().warn('no gap found, not publishing steering',
-                                       throttle_duration_sec=1.0)
+                # no gap: nothing is published, and the safety node's watchdog brakes
                 self.publish_debug(msg, source, None, 0.0, 0.0, math.inf, math.inf, None,
                                    False, 0.0, 0.0)
                 return
@@ -758,10 +748,7 @@ class GapFollowNode(Node):
 
             # d. choose the speed and publish
             passing = self.box_ahead(ranges, angles, boxes)
-            if passing != self.passing:
-                self.get_logger().info(f'passing a box: slowing down ({self.box_where})'
-                                       if passing else 'box passed: back to full speed')
-                self.passing = passing
+            self.passing = passing
             free = self.path_clearance(msg, angles, steering)
             # the turning side is nearly close enough for corner_check to cancel the turn:
             # the straight path it would switch to must be safe at this speed as well
@@ -776,9 +763,9 @@ class GapFollowNode(Node):
             self.publish_debug(msg, source, target, wanted_steering, steering, beside, free,
                                straight, passing, wanted, speed)
 
-        # error logging
+        # error logging (once: the watchdog stops the car if no requests follow)
         except Exception as exc:
-            self.get_logger().error(f'gap follow failed: {exc}', throttle_duration_sec=1.0)
+            self.get_logger().error(f'gap follow failed: {exc}', once=True)
 
 
 def main(args=None) -> None:
