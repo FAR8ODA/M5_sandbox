@@ -32,14 +32,14 @@ New in Milestone 4:
         arrival made static walls look like they were rushing at the car. Distances are also
         shortened by how far the car drove since the scan was taken.
     Two stages: below slow_factor times the required TTC the speed is capped so the TTC
-        stays there (soft); below the required TTC AEB brakes (hard) and stays latched
-        until the node restarts.
+        stays there (soft); below the required TTC AEB brakes (hard). It is not latched:
+        once the TTC is back above the threshold (the path opened up), the car drives on.
     Sensor fallback: /fused_scan is used normally; if it goes stale, the raw /scan.
     Fail safe: any error inside a callback brakes instead of stopping the node.
     Stop on exit: on Ctrl+C (or any other exit) the node sends a zero-speed /drive
         command before it ends, so the car is never left with a moving last command.
-    Logs: one line, "AEB engaged: <reason>", when the car is stopped for good (AEB, a
-        blocked path, or the lap counter's stop request). The mode is on /safety/state.
+    Logs: "AEB engaged: <reason>", once each time AEB brakes and once for the lap counter's
+        final stop. The mode is on /safety/state.
     Debug topic: every drive request and what was done with it is published on safety/debug
         as one line of JSON (only while something is subscribed, e.g. ros2 bag record).
 """
@@ -275,7 +275,6 @@ class SafetyNode(Node):
         self.declare_parameter('max_obstacle_speed', 3.0)  # faster readings are not believed (m/s)
         self.declare_parameter('obstacle_persist_scans', 4)  # must last this many scans
         self.declare_parameter('min_closing', 0.1)      # slower closing never triggers AEB (m/s)
-        self.declare_parameter('blocked_time', 1.0)     # held at 0 m/s this long: latched stop (s)
         self.declare_parameter('scan_timeout', 0.15)    # fused scan older: use raw /scan (s)
         self.declare_parameter('odom_timeout', 0.5)     # odometry older: use commanded speed (s)
 
@@ -298,7 +297,6 @@ class SafetyNode(Node):
         self.FACING_SPAN = math.radians(2.5)  # surface slope from the beams this far either side
         self.MAX_INCIDENCE = math.radians(45.0)  # steeper surfaces: no obstacle speed
         self.MIN_CLOSING = float(p('min_closing').value)
-        self.BLOCKED_TIME = float(p('blocked_time').value)
         self.SCAN_TIMEOUT = float(p('scan_timeout').value)
         self.ODOM_TIMEOUT = float(p('odom_timeout').value)
 
@@ -312,7 +310,6 @@ class SafetyNode(Node):
         self.last_command_speed = 0.0                   # last speed sent to /drive
         self.safety_mode = 'normal'                     # normal, slow, stale, aeb or stopped
         self.last_request_time: Time | None = None      # when the last drive request arrived
-        self.blocked_since: Time | None = None          # when the car was first held at 0 m/s
         self.last_check = (math.inf, math.inf, math.inf, math.inf, 0.0)  # path, cap, ttc,
         #                                                                 needed, obstacle speed
         self.sources = {'fused': ScanSource('fused', self.PERSIST_SCANS),
@@ -704,7 +701,7 @@ class SafetyNode(Node):
 
         # a negative speed requests a permanent stop (lap counter done)
         if msg.drive.speed < 0.0:
-            self.latch('stopped', 'stop requested (laps done)')
+            self.latch('stop requested (laps done)')
             return
 
         # latched: once stopped, stay stopped until the node restarts
@@ -730,22 +727,12 @@ class SafetyNode(Node):
             self.engage_aeb()
             return
 
-        # soft stage: slow down so the car can still stop
+        # soft stage: slow down so the car can still stop (after AEB too: it drives on)
         if cap < speed:
             speed = max(cap, 0.0)
             self.set_mode('slow')
-        elif self.safety_mode == 'slow':
+        elif self.safety_mode in ('slow', 'aeb'):
             self.set_mode('normal')
-
-        # held at 0 m/s by an obstacle for blocked_time: the path is blocked, stop for good
-        now = self.get_clock().now()
-        if speed < 0.05 and self.measured_speed() < 0.05:
-            self.blocked_since = self.blocked_since or now
-            if (now - self.blocked_since).nanoseconds * 1e-9 >= self.BLOCKED_TIME:
-                self.engage_aeb(reason='path blocked')
-                return
-        else:
-            self.blocked_since = None
 
         self.publish_drive_command(speed, self.latest_steering_angle)
 
@@ -786,35 +773,34 @@ class SafetyNode(Node):
         if self.inputs_fresh():
             return
 
-        if self.safety_mode in ('normal', 'slow'):
+        if self.safety_mode in ('normal', 'slow', 'aeb'):
             self.set_mode('stale')
         self.emergency_brake()
 
     # Outputs
 
     def is_latched(self) -> bool:
-        """Return True once AEB or a latched stop has stopped the car for good."""
-        return self.safety_mode in ('aeb', 'stopped')
+        """Return True once the lap counter's stop request has stopped the car for good."""
+        return self.safety_mode == 'stopped'
 
     def set_mode(self, mode: str) -> None:
         """
         Change the safety mode (published on /safety/state, not logged).
 
         Args:
-            mode (str): New mode: normal, slow or stale (latch() sets aeb and stopped).
+            mode (str): New mode: normal, slow or stale (engage_aeb() sets aeb, latch() stopped).
         """
         self.safety_mode = mode
 
-    def latch(self, mode: str, reason: str) -> None:
+    def latch(self, reason: str) -> None:
         """
-        Stop the car for good; the first time, log the one line this node ever logs.
+        Stop the car for good (the lap counter's stop); log it the first time.
 
         Args:
-            mode (str): 'aeb' or 'stopped'.
             reason (str): Why the car stopped, for the log.
         """
         if not self.is_latched():
-            self.safety_mode = mode
+            self.safety_mode = 'stopped'
             self.get_logger().error('AEB engaged: ' + reason)
         self.emergency_brake()
 
@@ -832,21 +818,22 @@ class SafetyNode(Node):
         except Exception:
             pass
 
-    def engage_aeb(self, reason: str = 'obstacle on the path') -> None:
+    def engage_aeb(self) -> None:
         """
-        Engage Automatic Emergency Braking and latch it.
+        Brake now (Automatic Emergency Braking), logging once each time it engages.
 
-        Args:
-            reason (str): Why AEB engaged, for the log.
+        Not latched: the next drive request that finds the TTC back above the threshold
+        lets the car drive on.
         """
-        nearest, _, ttc, needed, obstacle = self.last_check
-        if reason == 'path blocked':
-            detail = f'held at 0 m/s for {self.BLOCKED_TIME:.1f} s, path distance {nearest:.2f} m'
-        else:
+        if self.safety_mode != 'aeb':
+            nearest, _, ttc, needed, obstacle = self.last_check
             moving = f'approaching at {obstacle:.1f} m/s' if obstacle > 0.0 else 'static'
-            detail = (f'TTC {ttc:.2f} s (needs {needed:.2f} s), path distance {nearest:.2f} m, '
-                      f'speed {self.current_speed:.2f} m/s, obstacle {moving}')
-        self.latch('aeb', f'{reason} ({detail})')
+            self.safety_mode = 'aeb'
+            self.get_logger().error(
+                f'AEB engaged: obstacle on the path (TTC {ttc:.2f} s (needs {needed:.2f} s), '
+                f'path distance {nearest:.2f} m, speed {self.current_speed:.2f} m/s, '
+                f'obstacle {moving})')
+        self.emergency_brake()
 
     def publish_state(self) -> None:
         """Publish the safety mode and the last check on /safety/state, for debugging."""
@@ -869,8 +856,8 @@ class SafetyNode(Node):
         to /drive, m/s), v (measured speed, m/s), steer (rad), path (nearest point on the
         path, m), cap (soft-stage speed cap, m/s), ttc and ttc_needed (most urgent point and
         the AEB threshold there, s), obstacle (its own speed towards us, m/s), scan ('fused',
-        'raw' or 'none'), lag (how late that scan arrived, s), blocked (held at 0 m/s by an
-        obstacle for this long, s). null means none (nothing on the path).
+        'raw' or 'none'), lag (how late that scan arrived, s). null means none (nothing on
+        the path).
 
         Args:
             msg (AckermannDriveStamped): The request that was just handled.
@@ -884,8 +871,7 @@ class SafetyNode(Node):
             requested=msg.drive.speed, commanded=self.last_command_speed,
             v=self.current_speed, steer=self.latest_steering_angle,
             path=nearest, cap=cap, ttc=ttc, ttc_needed=needed, obstacle=obstacle,
-            scan=source.name if source else 'none', lag=source.lag if source else None,
-            blocked=self.age_seconds(self.blocked_since) if self.blocked_since else 0.0)))
+            scan=source.name if source else 'none', lag=source.lag if source else None)))
 
     def publish_drive_command(self, speed: float, steering_angle: float) -> None:
         """

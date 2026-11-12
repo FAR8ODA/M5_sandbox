@@ -117,7 +117,7 @@ Only scan points inside the car's swept path (the steering arc, ±0.20 m) count,
 ```
 ttc      = (distance along path − stop_margin) / v
 T(v)     = t_react + v / (2 · a_brake) + ttc_margin          (time needed to stop)
-AEB      ttc ≤ T(v), at the measured speed — latched until restart
+AEB      ttc ≤ T(v), at the measured speed — brakes until the TTC is back above T(v)
 soft cap speed limited so that ttc ≥ 2 · T(v)
 ```
 
@@ -132,7 +132,7 @@ soft cap speed limited so that ttc ≥ 2 · T(v)
 - With `track_obstacles:=true`, an obstacle's own approach speed is added: scans are lined up using the car's own motion, so only real movement remains. It is off by default until it is validated on the car.
 
 Other safety behaviour:
-- **Latched stops**: AEB, the lap counter's stop, and a path blocked for 1 s all stop the car until restart.
+- **Latched stop**: only the lap counter's stop holds until restart. AEB is not latched: the car drives on once the path opens up.
 - **Watchdog**: the car brakes while drive requests or scans are stale.
 - **Fallback**: if the fused scan stops, safety and driving fall back to the raw `/scan`.
 - **Errors**: an exception in a callback brakes the car instead of killing the node.
@@ -193,7 +193,7 @@ Two topics explain every decision, one line of JSON text (`std_msgs/String`) eac
 | Topic | Published | Fields |
 | --- | --- | --- |
 | `/gap_follow/debug` | once per scan | `t` (scan stamp), `scan` (fused/raw), `gap` (false: no target), `target_deg`, `target_m`, `steer_want` and `steer` (before and after the side check), `beside` (nearest reading beside the turning side), `free` (distance the braking limit used), `free_straight` (set when the side rule checked the straight path), `v` (measured speed), `lim_max`, `lim_brake`, `lim_corner`, `lim_pass`, `limit` (which one set the speed: `max`, `brake`, `corner`, `pass`, `min`, or `ramp` while accelerating), `speed`, `passing`, `boxes` (beams labelled as a box) |
-| `/safety/debug` | once per drive request | `t`, `mode` (normal/slow/stale/aeb/stopped), `requested`, `commanded`, `v`, `steer`, `path` (nearest point on the path), `cap` (soft-stage speed cap), `ttc`, `ttc_needed`, `obstacle` (its own speed), `scan`, `lag`, `blocked` |
+| `/safety/debug` | once per drive request | `t`, `mode` (normal/slow/stale/aeb/stopped), `requested`, `commanded`, `v`, `steer`, `path` (nearest point on the path), `cap` (soft-stage speed cap), `ttc`, `ttc_needed`, `obstacle` (its own speed), `scan`, `lag` |
 
 Distances are in metres, speeds in m/s, angles in radians (except `target_deg`), times in seconds; `null` means none (nothing on the path, no limit).
 

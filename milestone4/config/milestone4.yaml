@@ -80,7 +80,6 @@ safety_node:
     drive_speed: 1.0          # speed cap; keep equal to gap_follow max_speed (m/s)
     stale_timeout: 0.25       # brake when requests or scans are older (s)
     slow_factor: 2.0          # soft stage keeps TTC >= this x the TTC needed to stop
-    blocked_time: 1.0         # held at 0 m/s this long: latched stop (s)
     min_closing: 0.1          # slower closing speeds never trigger AEB (m/s)
 
     # Moving obstacles

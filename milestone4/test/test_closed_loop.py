@@ -80,28 +80,29 @@ class ClosedLoopTest(unittest.TestCase):
 
         result = cl.run(world, num_laps=1, min_lap_distance=self.gate, max_time=5.0)
         self.assert_no_crash(result)
-        self.assertEqual(result['mode'], 'aeb')                # latched, stopped before it
+        self.assertIn('aeb', [mode for t, x, y, v, mode, laps in result['trace']])
+        self.assertLess(result['trace'][-1][3], 0.01)         # waits in front of it
 
     def test_stops_safely_when_the_lane_is_blocked(self):
         # halfway round, two boxes side by side fill the middle of the lane and leave gaps
         # narrower than the car. The car must stop in front of them, with room to spare, and
-        # stay stopped (latched) instead of squeezing through or driving into them.
+        # stay stopped while they block the lane instead of squeezing through or into them.
         world = np.vstack([self.track, cl.blocking_boxes()])
         box_face = 0.2                                         # near face of the boxes (x)
         for kw in ({}, dict(cl.REALISTIC_CAR, max_speed=1.5)):
             result = cl.run(world, num_laps=3, min_lap_distance=self.gate, max_time=25, **kw)
             self.assertGreater(result['closest'], CAR_HALF_WIDTH + 0.1)   # 10 cm to spare
-            self.assertEqual(result['mode'], 'aeb')            # latched stop, not the lap stop
             self.assertEqual(result['laps'], 0)
             self.assertGreater(result['distance'], 9.0)        # drove to the boxes first
             trace = result['trace']
             t, x, y, v, mode, laps = trace[-1]
             self.assertAlmostEqual(y, 4.0, delta=0.3)          # on the far straight
             self.assertGreater(x, box_face)                    # before the boxes (heading -x)
-            stopped_at = min(t for t, x, y, v, mode, laps in trace if mode == 'aeb')
+            stopped_at = min(t for t, x, y, v, mode, laps in trace if v < 0.01 and y > 3.0)
             held = [v for t, x, y, v, mode, laps in trace if t > stopped_at + 0.5]
             self.assertGreater(len(held), 100)                 # watched for over 2.5 s
-            self.assertLess(max(held), 0.01)                   # and it stayed stopped
+            self.assertLess(max(held), 0.1)                    # it waits (AEB is not latched:
+            #                                                    it may inch a few cm closer)
 
     def test_blocked_lane_with_weak_late_brakes(self):
         # the braking model assumes a_brake = 2.0 m/s^2 and no motor delay. The real car may
@@ -114,7 +115,6 @@ class ClosedLoopTest(unittest.TestCase):
                             car_brake=0.7, drive_delay=0.2, lidar_to_bumper=0.15,
                             **dict(cl.REALISTIC_CAR, max_speed=speed))
             self.assertGreater(result['body_clearance'], 0.10)
-            self.assertEqual(result['mode'], 'aeb')
             self.assertLess(result['trace'][-1][3], 0.01)     # stopped
 
     def test_obstacle_speed_tracking_prevents_a_crash(self):
@@ -146,7 +146,7 @@ class ClosedLoopTest(unittest.TestCase):
             tracked = gap(box_speed, seconds, True)            # track_obstacles:=true
             ignored = gap(box_speed, seconds, False)           # static obstacles only
             self.assertGreater(tracked['closest'] - ignored['closest'], 0.05)
-            self.assertEqual(tracked['mode'], 'aeb')
+            self.assertIn('aeb', [mode for t, x, y, v, mode, laps in tracked['trace']])
         self.assert_no_crash(tracked)                          # 2.5 m/s: avoided with tracking
         self.assertLess(ignored['closest'], CAR_HALF_WIDTH)    # and hit without it
 

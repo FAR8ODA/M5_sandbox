@@ -259,12 +259,14 @@ class SafetyNodeTest(unittest.TestCase):
             self.step(i * 0.025, box, speed=0.0)
         self.assertNotEqual(self.node.safety_mode, 'aeb')
 
-    def test_aeb_is_latched(self):
+    def test_aeb_releases_once_the_path_clears(self):
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 0.8, -0.2, 0.2)
         self.step(0.0, box, speed=1.5)
-        self.step(0.025, ros_stubs.corridor_ranges(1.0), speed=0.0, request=(0.0, 1.5))
         self.assertEqual(self.node.safety_mode, 'aeb')
         self.assertEqual(self.commands()[-1].drive.speed, 0.0)
+        self.step(0.025, ros_stubs.corridor_ranges(1.0), speed=0.0, request=(0.0, 1.5))
+        self.assertEqual(self.node.safety_mode, 'normal')      # not latched: drives on
+        self.assertGreater(self.commands()[-1].drive.speed, 0.0)
 
     def test_negative_speed_request_latches_a_stop(self):
         clear = ros_stubs.corridor_ranges(1.0)
@@ -296,14 +298,14 @@ class SafetyNodeTest(unittest.TestCase):
         self.step(0.025, clear, speed=0.0, source='fused')
         self.assertIs(self.node.active_source(), self.node.sources['fused'])
 
-    def test_blocked_path_latches_a_stop(self):
+    def test_blocked_path_waits_then_drives_on(self):
         blocked = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 0.2, -0.3, 0.3)
-        for i in range(30):
+        for i in range(30):                                    # held 1.5 s in front of it
             self.step(i * 0.05, blocked, speed=0.0, request=(0.0, 1.0))
-        self.assertEqual(self.node.safety_mode, 'aeb')
-        records = self.node.get_logger().records
-        self.assertEqual(len(records), 1)
-        self.assertTrue(records[0][1].startswith('AEB engaged: path blocked (held at 0 m/s'))
+        self.assertEqual(self.commands()[-1].drive.speed, 0.0)
+        self.assertFalse(self.node.is_latched())
+        self.step(1.5, ros_stubs.corridor_ranges(1.0), speed=0.0, request=(0.0, 1.0))
+        self.assertGreater(self.commands()[-1].drive.speed, 0.0)   # path open: go again
 
     def test_state_topic(self):
         self.step(0.0, ros_stubs.corridor_ranges(1.0), speed=0.0, request=(0.0, 1.0))
