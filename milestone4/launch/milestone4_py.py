@@ -23,6 +23,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+import yaml
 
 
 def as_bool(value: str) -> bool:
@@ -96,6 +97,24 @@ OVERRIDES: Dict[str, Dict[str, str]] = {
 }
 
 
+def load_parameter_file(path: str) -> Dict[str, dict]:
+    """
+    Read a ROS 2 parameter file.
+
+    Args:
+        path (str): Parameter file in the ros__parameters layout.
+
+    Returns:
+        dict: {section: parameters}, where the sections are '/**' (shared by every node)
+        and the node names.
+    """
+    with open(path, encoding='utf-8') as stream:
+        document = yaml.safe_load(stream) or {}
+    return {(name if name == '/**' else name.lstrip('/')):
+            dict((section or {}).get('ros__parameters') or {})
+            for name, section in document.items()}
+
+
 def overrides_for(node: str, context: LaunchContext) -> dict:
     """
     Collect the parameters a node gets from launch arguments given on the command line.
@@ -120,8 +139,13 @@ def launch_nodes(context: LaunchContext) -> list:
     """
     Create the nodes once the launch arguments are known.
 
-    Each node gets the parameter file first, then its overrides; ROS applies them in order,
-    so the overrides win.
+    Each node gets one set of parameters, merged here in this order (later wins): the
+    file's shared /** section, the node's own section, the sensor switches, then the
+    command-line overrides. Passing the file and the overrides separately does not work:
+    launch writes the overrides under /** (our nodes have no namespace), and ROS applies a
+    node's own section of the file after /**, so max_speed:=1.4 was replaced by the file's
+    drive_speed: 1.0 in safety_node (and likewise every argument whose value sits in a
+    node's own section).
 
     Args:
         context (LaunchContext): Launch context holding the argument values.
@@ -129,15 +153,16 @@ def launch_nodes(context: LaunchContext) -> list:
     Returns:
         list: The RealSense include and the Milestone 4 nodes.
     """
-    params_file = LaunchConfiguration('params_file').perform(context)
+    sections = load_parameter_file(LaunchConfiguration('params_file').perform(context))
     use_camera = as_bool(LaunchConfiguration('use_camera').perform(context))
     use_depth = as_bool(LaunchConfiguration('use_depth').perform(context))
     start_camera = as_bool(LaunchConfiguration('start_camera').perform(context))
     odom = [('ego_racecar/odom', LaunchConfiguration('odom_topic').perform(context))]
 
     def params(node: str, extra: dict | None = None) -> list:
-        """Parameter file, then the sensor switches, then the command-line overrides."""
-        return [params_file, {**(extra or {}), **overrides_for(node, context)}]
+        """Merge the file's shared and own sections, the sensor switches and the overrides."""
+        return [{**sections.get('/**', {}), **sections.get(node, {}), **(extra or {}),
+                 **overrides_for(node, context)}]
 
     actions = []
 
