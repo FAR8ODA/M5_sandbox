@@ -82,9 +82,9 @@ class LateCameraTest(unittest.TestCase):
 
     def test_camera_after_the_car_left_is_not_used(self):
         self.run_start(camera_from=1.0, speed=1.0)            # 1 m away by then
-        self.assertIsNone(self.node.cam_reference)
-        warnings = [m for level, m in self.node.get_logger().records if level == 'warn']
-        self.assertTrue(any('LiDAR only' in m for m in warnings))
+        self.assertIsNone(self.node.cam_reference)            # laps on the LiDAR only
+        self.assertIsNotNone(self.node.lidar_reference)
+        self.assertEqual(self.node.get_logger().records, [])  # and nothing logged
 
 
 class CounterTest(unittest.TestCase):
@@ -196,6 +196,12 @@ class CounterTest(unittest.TestCase):
 
         stops = node.publishers_by_topic['drive_request'].messages
         self.assertLess(stops[-1].drive.speed, 0.0)           # latched stop requested
+
+        # the only log lines: one per lap, the last one saying the car stops
+        logs = node.get_logger().records
+        self.assertEqual([level for level, _ in logs], ['info', 'info'])
+        self.assertRegex(logs[0][1], r'^Lap 1/2 \(score \d\.\d\d, \d+\.\d m driven\)$')
+        self.assertRegex(logs[1][1], r'^Lap 2/2 \(score \d\.\d\d, \d+\.\d m driven\): stopping$')
 
 
 if __name__ == '__main__':

@@ -26,6 +26,8 @@ The lap counter then:
 
 This is received by safety_node, which stops the car and keeps it stopped.
 A debug image is published on /lap_counter/debug when someone is subscribed.
+The only log line is one per lap: "Lap 2/3 (score 0.91, 14.2 m driven)", with ": stopping"
+added after the last lap.
 """
 
 # include needed imports
@@ -157,7 +159,6 @@ class LapCounterNode(Node):
         self.phase = 'reference'        # 'reference', 'blind' or 'search'
         self.ref_start = None           # time of the first reference sample (s)
         self.ref_distance = 0.0         # odometry distance when the reference started (m)
-        self.camera_warned = False      # warned that the camera missed the reference
         self.cam_sum = None             # running sum of the reference thumbnails
         self.cam_count = 0
         self.lidar_sum = None           # running sum of the reference LiDAR profiles
@@ -172,7 +173,6 @@ class LapCounterNode(Node):
         self.blind_until = 0.0          # end of the current blind period (s)
         self.armed = False              # score has dropped since the last lap
         self.streak = 0                 # ticks in a row at or above the threshold
-        self.lookalike_logged = False   # this lap's look-alike view was already logged
         self.peak = None                # best score since the match was confirmed
         self.peak_since = 0.0           # when the match was confirmed (s)
         self.scores = (None, None, None)  # (combined, camera, lidar) of the last tick
@@ -184,7 +184,6 @@ class LapCounterNode(Node):
         self.first_lap_distance = None  # length of lap 1 (m)
         self.last_lap_length = 0.0      # length of the last counted lap (m)
         self.last_odom_time = None      # time of the previous odometry message (s)
-        self.odom_warned = False        # warned that there is no odometry
 
         # create subscribers and publishers
         self.bridge = CvBridge()
@@ -209,11 +208,6 @@ class LapCounterNode(Node):
         # evaluate the score at a fixed rate, and keep repeating the stop once done
         self.create_timer(self.TICK_PERIOD, self.tick)
         self.create_timer(0.1, self.stop_timer_callback)
-
-        self.get_logger().info(
-            f'lap_counter_node: stopping after {self.NUM_LAPS} laps '
-            f'(camera {"on" if self.USE_CAMERA else "off"}, LiDAR on, '
-            f'min lap distance {self.MIN_LAP_DISTANCE} m)')
 
     def now_seconds(self) -> float:
         """Return the node clock time in seconds."""
@@ -325,7 +319,7 @@ class LapCounterNode(Node):
             if self.debug_publisher.get_subscription_count() > 0:
                 self.publish_debug(bgr, msg)
         except Exception as exc:
-            self.get_logger().error(f'lap counter image failed: {exc}', throttle_duration_sec=2.0)
+            self.get_logger().error(f'lap counter image failed: {exc}', once=True)
 
     def lidar_callback(self, msg: LaserScan) -> None:
         """
@@ -347,7 +341,7 @@ class LapCounterNode(Node):
                                             else 0.0)
                 self.lidar_count += 1
         except Exception as exc:
-            self.get_logger().error(f'lap counter scan failed: {exc}', throttle_duration_sec=2.0)
+            self.get_logger().error(f'lap counter scan failed: {exc}', once=True)
 
     def odom_callback(self, msg: Odometry) -> None:
         """
@@ -407,9 +401,6 @@ class LapCounterNode(Node):
             or if there is no odometry at all (the gate is then skipped).
         """
         if self.last_odom_time is None:
-            if not self.odom_warned:
-                self.get_logger().warn('no odometry: lap distance gate disabled')
-                self.odom_warned = True
             return True
         return self.distance - self.lap_start_distance >= self.lap_gate()
 
@@ -446,21 +437,16 @@ class LapCounterNode(Node):
         return (now - self.ref_start <= self.LATE_REFERENCE_TIME
                 and self.distance - self.ref_distance <= self.LATE_REFERENCE_MOVE)
 
-    def late_camera_reference(self, now: float) -> None:
+    def late_camera_reference(self) -> None:
         """
-        Build the camera reference from late frames, or warn once that it was missed.
+        Build the camera reference from late frames, once enough arrived near the start.
 
-        Args:
-            now: current time (s)
+        Frames are only collected while camera_reference_open(); if too few arrive, laps
+        are counted on the LiDAR only.
         """
         if self.cam_count >= self.LATE_REFERENCE_FRAMES:
             self.reference_thumb = (self.cam_sum / self.cam_count).astype(np.float32)
             self.cam_reference = self.image_signature(self.reference_thumb)
-            self.get_logger().info(f'camera reference captured late ({self.cam_count} frames)')
-        elif not self.camera_reference_open(now) and not self.camera_warned:
-            self.get_logger().warn('camera not ready at the start: laps are counted on the '
-                                   'LiDAR only')
-            self.camera_warned = True
 
     def finish_reference(self, now: float) -> None:
         """
@@ -476,9 +462,6 @@ class LapCounterNode(Node):
             self.lidar_reference = self.lidar_signature(self.lidar_sum / self.lidar_count)
         self.phase = 'blind'
         self.blind_until = now + self.BLIND_TIME
-        self.get_logger().info(
-            f'reference captured ({self.cam_count} frames, {self.lidar_count} scans); '
-            f'counting starts in {self.BLIND_TIME:.0f} s')
 
     def update_counter(self, score: float, now: float) -> bool:
         """
@@ -512,11 +495,6 @@ class LapCounterNode(Node):
 
             # a match before the car has driven far enough is a look-alike spot, not the start
             if not self.distance_ok():
-                if not self.lookalike_logged:             # once per lap: it can last a straight
-                    self.get_logger().info(
-                        f'start-like view after {self.distance - self.lap_start_distance:.1f} m '
-                        f'(< {self.lap_gate():.1f} m): not a lap')
-                    self.lookalike_logged = True
                 self.armed = False
                 self.streak = 0
                 return False
@@ -536,7 +514,6 @@ class LapCounterNode(Node):
 
         # lap counted: back to blind, so one pass over the start counts once
         self.peak = None
-        self.lookalike_logged = False
         self.laps += 1
         self.last_lap_length = self.distance - self.lap_start_distance
         if self.first_lap_distance is None and self.last_odom_time is not None:
@@ -561,7 +538,7 @@ class LapCounterNode(Node):
         try:
             self.evaluate(self.now_seconds())
         except Exception as exc:
-            self.get_logger().error(f'lap counter failed: {exc}', throttle_duration_sec=2.0)
+            self.get_logger().error(f'lap counter failed: {exc}', once=True)
 
     def evaluate(self, now: float) -> None:
         """
@@ -581,7 +558,7 @@ class LapCounterNode(Node):
                 self.finish_reference(now)
             return
         if self.USE_CAMERA and self.cam_reference is None:
-            self.late_camera_reference(now)
+            self.late_camera_reference()
 
         # b. similarity to the starting view
         score, sim_cam, sim_lidar = self.similarity(now)
@@ -594,15 +571,15 @@ class LapCounterNode(Node):
         if sim_lidar is not None:
             self.lidar_similarity_publisher.publish(Float32(data=sim_lidar))
 
-        # c. update the counter
+        # c. update the counter (the one log line: one per lap)
         if self.update_counter(score, now):
             self.get_logger().info(
-                f'Lap {self.laps} (score {score:.2f}, {self.last_lap_length:.1f} m driven)')
+                f'Lap {self.laps}/{self.NUM_LAPS} (score {score:.2f}, '
+                f'{self.last_lap_length:.1f} m driven)' + (': stopping' if self.done else ''))
             self.lap_publisher.publish(Int32(data=self.laps))
 
             # d. all laps done: request the latched stop
             if self.done:
-                self.get_logger().warn(f'All {self.NUM_LAPS} laps completed: requesting stop')
                 self.publish_stop()
 
     # Outputs

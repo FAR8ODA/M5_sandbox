@@ -218,7 +218,7 @@ Try a value with a launch argument (`a_brake:=2.4`), then write it into `config/
 1. **Camera alignment**: overlay `/scan` and `/camera_scan` in rviz; adjust `cam_x` / `cam_yaw_deg` until the walls line up. Measure `cam_z` (camera lens above the LiDAR's scan plane) with a ruler. Then put a box 1–3 m ahead and check that `/obstacle_scan` marks its whole face and nothing else.
 2. **Braking**: let AEB stop the car from a known speed v, measure the stopping distance d, and set `a_brake = v² / (2d)`.
 3. **Speed**: raise `max_speed` 1.0 → 1.25 → 1.5, watching `/safety/state` for unwanted `slow` or `aeb`; then tune `a_lat`.
-4. **Lap distance**: read the lap length from the `Lap 1 (... m driven)` log and set `min_lap_distance` to about ¾ of it.
+4. **Lap distance**: read the lap length from the `Lap 1/3 (... m driven)` log and set `min_lap_distance` to about ¾ of it.
 
 ## Parameters and Launch Arguments
 
