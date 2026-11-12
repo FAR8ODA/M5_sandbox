@@ -1,5 +1,6 @@
 """Tests for the disparity-extender gap follow node."""
 
+import json
 import math
 import unittest
 
@@ -313,3 +314,51 @@ class BoxLabelDebounceTest(unittest.TestCase):
         r[boxes] = 0.9
         self.assertTrue(self.node.box_ahead(r, a, boxes))
         self.assertEqual(self.node.box_where, '0.9 m ahead, 30 deg left')
+
+
+class DebugTopicTest(unittest.TestCase):
+    """gap_follow/debug: one line of JSON per decision, only while someone listens."""
+
+    def setUp(self):
+        ros_stubs.CLOCK.seconds = 0.0
+        ros_stubs.PARAM_OVERRIDES.clear()
+        self.node = GapFollowNode()
+        self.debug = self.node.publishers_by_topic['gap_follow/debug']
+
+    def test_nothing_is_published_without_a_subscriber(self):
+        self.node.fused_callback(ros_stubs.make_scan(ros_stubs.corridor_ranges(1.0)))
+        self.assertEqual(len(self.node.publishers_by_topic['drive_request'].messages), 1)
+        self.assertEqual(self.debug.messages, [])
+
+    def test_decision_matches_the_drive_request(self):
+        self.debug.subscribers = 1
+        scan = ros_stubs.make_scan(ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 1.0,
+                                                     -0.2, 0.2), t=2.5)
+        self.node.previous_speed = 1.0                 # already driving: no ramp
+        self.node.fused_callback(scan)
+        request = self.node.publishers_by_topic['drive_request'].messages[-1].drive
+        line = json.loads(self.debug.messages[-1].data)
+        self.assertEqual((line['t'], line['scan'], line['gap']), (2.5, 'fused', True))
+        self.assertAlmostEqual(line['speed'], request.speed, places=3)
+        self.assertAlmostEqual(line['steer'], request.steering_angle, places=3)
+        self.assertEqual(line['limit'], 'brake')       # a box 1 m ahead: braking decides
+        self.assertAlmostEqual(line['lim_brake'], request.speed, places=3)
+        self.assertIsNone(line['lim_pass'])            # no camera label: no passing cap
+        self.assertIsNone(line['free_straight'])       # nothing beside: side rule not used
+
+    def test_open_space_is_valid_json(self):
+        # nothing on the path: the free distance is infinite, which JSON cannot write
+        self.debug.subscribers = 1
+        self.node.previous_speed = 1.0
+        self.node.fused_callback(ros_stubs.make_scan(np.full(ros_stubs.LIDAR_BEAMS, np.inf)))
+        text = self.debug.messages[-1].data
+        self.assertNotIn('Infinity', text)
+        line = json.loads(text)
+        self.assertIsNone(line['free'])
+        self.assertEqual(line['limit'], 'max')
+
+    def test_no_gap_is_reported(self):
+        self.debug.subscribers = 1
+        self.node.fused_callback(ros_stubs.make_scan(np.full(ros_stubs.LIDAR_BEAMS, 0.2)))
+        self.assertEqual(self.node.publishers_by_topic['drive_request'].messages, [])
+        self.assertFalse(json.loads(self.debug.messages[-1].data)['gap'])

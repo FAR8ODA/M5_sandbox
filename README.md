@@ -25,6 +25,7 @@ cd ~/f1tenth_ws && colcon build --packages-select milestone4 && source install/s
 - Hold the joystick's autonomous button, or `/drive` does not reach the motor.
 - Ctrl+C in terminal 3 stops the car: `safety_node` sends zero speed before it exits.
 - Watch the safety state with `ros2 topic echo /safety/state`.
+- Record a run for debugging: see [Debug topics](#debug-topics).
 - Simulator (LiDAR only): `ros2 launch milestone4 milestone4_py.py use_camera:=false odom_topic:=/ego_racecar/odom`.
 
 ## System Diagram
@@ -159,7 +160,7 @@ A lap counts at the peak of the score, only after the car has left the start and
 
 ## Testing
 
-- **Unit and closed-loop tests** (`milestone4/test/`, 150 tests): the nodes' callbacks are called directly, with `test/ros_stubs.py` standing in for rclpy and the message types, so no ROS install is needed.
+- **Unit and closed-loop tests** (`milestone4/test/`, 157 tests): the nodes' callbacks are called directly, with `test/ros_stubs.py` standing in for rclpy and the message types, so no ROS install is needed.
 
   ```bash
   cd milestone4/test
@@ -184,6 +185,31 @@ A lap counts at the peak of the score, only after the car has left the start and
   3. A box pushed at the car.
   4. `use_camera:=false`, to check LiDAR-only driving.
   5. 3-lap counting.
+
+## Debug Topics
+
+Two topics explain every decision, one line of JSON text (`std_msgs/String`) each. They are only built while something is subscribed (`ros2 topic echo`, `ros2 bag record`), so they cost nothing in a normal run.
+
+| Topic | Published | Fields |
+| --- | --- | --- |
+| `/gap_follow/debug` | once per scan | `t` (scan stamp), `scan` (fused/raw), `gap` (false: no target), `target_deg`, `target_m`, `steer_want` and `steer` (before and after the side check), `beside` (nearest reading beside the turning side), `free` (distance the braking limit used), `free_straight` (set when the side rule checked the straight path), `v` (measured speed), `lim_max`, `lim_brake`, `lim_corner`, `lim_pass`, `limit` (which one set the speed: `max`, `brake`, `corner`, `pass`, `min`, or `ramp` while accelerating), `speed`, `passing`, `boxes` (beams labelled as a box) |
+| `/safety/debug` | once per drive request | `t`, `mode` (normal/slow/stale/aeb/stopped), `requested`, `commanded`, `v`, `steer`, `path` (nearest point on the path), `cap` (soft-stage speed cap), `ttc`, `ttc_needed`, `obstacle` (its own speed), `scan`, `lag`, `blocked` |
+
+Distances are in metres, speeds in m/s, angles in radians (except `target_deg`), times in seconds; `null` means none (nothing on the path, no limit).
+
+Record a run, including the inputs so it can be replayed through the nodes afterwards:
+
+```bash
+ros2 bag record -o run1 /scan /fused_scan /obstacle_scan /drive_request /drive /odom \
+    /gap_follow/debug /safety/debug /safety/state
+```
+
+Add `/camera_box_mask` when the problem is box detection (leave the raw images out: they make the bag large). To get plain text files instead of a bag:
+
+```bash
+ros2 topic echo --field data /gap_follow/debug > gap_follow.txt &
+ros2 topic echo --field data /safety/debug > safety.txt
+```
 
 ## Tuning on the Track
 

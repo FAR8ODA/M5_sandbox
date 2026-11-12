@@ -26,6 +26,10 @@ The algorithm (Gap Following lecture, FTG Tweaks 2-4):
 
 Finally, gap_follow_node publishes the steering and speed on /drive_request.
 This is received by safety_node, which caps the speed and applies AEB.
+
+For debugging, every decision is also published on gap_follow/debug as one line of JSON
+(only while something is subscribed, e.g. ros2 bag record): the target, the steering before
+and after the side check, the free distance, each speed limit and which one set the speed.
 """
 
 # include needed imports
@@ -36,12 +40,14 @@ import math
 
 from ackermann_msgs.msg import AckermannDriveStamped
 from milestone4.braking import path_distances, slow_speed_cap
+from milestone4.debug_log import encode
 from nav_msgs.msg import Odometry
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 
 
 # Disparity Extender (UNC Chapel Hill, F1TENTH CPSWeek 2019; lecture slides 23-30)
@@ -208,6 +214,7 @@ class GapFollowNode(Node):
             AckermannDriveStamped,
             'drive_request',
             10)  # steering + speed request, safety node caps the speed
+        self.debug_publisher = self.create_publisher(String, 'gap_follow/debug', 10)
 
         self.create_subscription(LaserScan, 'fused_scan', self.fused_callback, 10)
         self.create_subscription(LaserScan, 'scan', self.raw_callback, 10)
@@ -646,6 +653,61 @@ class GapFollowNode(Node):
         drive_msg.drive.speed = float(speed)
         self.publisher_.publish(drive_msg)
 
+    def publish_debug(self, msg: LaserScan, source: str, target: tuple[float, float] | None,
+                      wanted_steering: float, steering: float, beside: float, free: float,
+                      straight: float | None, passing: bool, wanted: float,
+                      speed: float) -> None:
+        """
+        Publish why this steering and speed were chosen, as one line of JSON.
+
+        Nothing is built or sent unless something is subscribed to gap_follow/debug.
+
+        Fields: t (scan stamp, s), scan ('fused' or 'raw'), gap (False if no target was
+        found; the rest is then left out), target_deg and target_m (bearing, left positive,
+        and range of the target), steer_want and steer (rad, before and after the side
+        check), beside (nearest reading beside the turning side, m), free (distance used for
+        the braking limit, m), free_straight (straight-path distance, when the side rule
+        looked at it, m), v (measured speed, m/s), lim_max / lim_brake / lim_corner /
+        lim_pass (each speed limit, m/s; null = no limit), limit (which one set the speed:
+        max, brake, corner, pass, min = lifted to min_speed, ramp = still accelerating),
+        speed (requested, m/s), passing, boxes (beams labelled as a box).
+
+        Args:
+            msg: the scan that was processed
+            source: 'fused' or 'raw'
+            target: (bearing in rad, range in m) of the target, or None if there is no gap
+            wanted_steering: steering before the side check (rad)
+            steering: steering that was sent (rad)
+            beside: nearest reading beside the turning side (m)
+            free: free distance the braking limit used (m)
+            straight: free distance straight ahead if the side rule checked it, else None (m)
+            passing: True while passing a confirmed box
+            wanted: speed before the acceleration ramp (m/s)
+            speed: speed that was sent (m/s)
+        """
+        if self.debug_publisher.get_subscription_count() == 0:
+            return
+        t = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        if target is None:
+            self.debug_publisher.publish(String(data=encode(t=t, scan=source, gap=False)))
+            return
+        limits = {'max': self.MAX_SPEED, 'brake': self.braking_limit(free),
+                  'corner': self.cornering_limit(steering),
+                  'pass': self.PASS_SPEED if passing else math.inf}
+        limit = min(limits, key=limits.get)
+        if speed < wanted - 1e-9:
+            limit = 'ramp'
+        elif wanted > limits[limit] + 1e-9:
+            limit = 'min'
+        self.debug_publisher.publish(String(data=encode(
+            t=t, scan=source, gap=True,
+            target_deg=math.degrees(target[0]), target_m=target[1],
+            steer_want=wanted_steering, steer=steering, beside=beside,
+            free=free, free_straight=straight, v=self.lookahead_speed(),
+            lim_max=limits['max'], lim_brake=limits['brake'], lim_corner=limits['corner'],
+            lim_pass=limits['pass'], limit=limit, speed=speed, passing=bool(passing),
+            boxes=int(np.count_nonzero(self.box_beams(len(msg.ranges)))))))
+
     # Processes each scan to calculate and publish the drive request.
     def drive_on(self, msg: LaserScan, source: str) -> None:
         """
@@ -686,10 +748,13 @@ class GapFollowNode(Node):
             if index is None:
                 self.get_logger().warn('no gap found, not publishing steering',
                                        throttle_duration_sec=1.0)
+                self.publish_debug(msg, source, None, 0.0, 0.0, math.inf, math.inf, None,
+                                   False, 0.0, 0.0)
                 return
-            steering = self.calculate_steering_angle(float(angles[index]), float(extended[index]))
-            beside = self.side_distance(ranges, angles, steering)
-            steering = self.corner_check(ranges, angles, steering)
+            target = (float(angles[index]), float(extended[index]))
+            wanted_steering = self.calculate_steering_angle(*target)
+            beside = self.side_distance(ranges, angles, wanted_steering)
+            steering = self.corner_check(ranges, angles, wanted_steering)
 
             # d. choose the speed and publish
             passing = self.box_ahead(ranges, angles, boxes)
@@ -700,11 +765,16 @@ class GapFollowNode(Node):
             free = self.path_clearance(msg, angles, steering)
             # the turning side is nearly close enough for corner_check to cancel the turn:
             # the straight path it would switch to must be safe at this speed as well
+            straight = None
             if beside < self.SIDE_CLEAR + self.SIDE_WARN:
-                free = min(free, self.path_clearance(msg, angles, 0.0))
-            speed = self.ramp(self.calculate_speed(free, steering, passing))
+                straight = self.path_clearance(msg, angles, 0.0)
+                free = min(free, straight)
+            wanted = self.calculate_speed(free, steering, passing)
+            speed = self.ramp(wanted)
             self.previous_speed = speed
             self.publish_drive(steering, speed)
+            self.publish_debug(msg, source, target, wanted_steering, steering, beside, free,
+                               straight, passing, wanted, speed)
 
         # error logging
         except Exception as exc:

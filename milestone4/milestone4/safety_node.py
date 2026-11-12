@@ -39,6 +39,8 @@ New in Milestone 4:
     Stop on exit: on Ctrl+C (or any other exit) the node sends a zero-speed /drive
         command before it ends, so the car is never left with a moving last command.
     Quiet logs: one message per state change, warnings throttled.
+    Debug topic: every drive request and what was done with it is published on safety/debug
+        as one line of JSON (only while something is subscribed, e.g. ros2 bag record).
 """
 
 # include needed imports
@@ -50,6 +52,7 @@ import time
 
 from ackermann_msgs.msg import AckermannDriveStamped
 from milestone4.braking import car_motion, path_distances, required_ttc, slow_speed_cap
+from milestone4.debug_log import encode
 from nav_msgs.msg import Odometry
 import numpy as np
 import rclpy
@@ -321,6 +324,7 @@ class SafetyNode(Node):
         # note: only safety_node publishes to /drive.
         self.drive_publisher = self.create_publisher(AckermannDriveStamped, 'drive', 10)
         self.state_publisher = self.create_publisher(String, 'safety/state', 10)
+        self.debug_publisher = self.create_publisher(String, 'safety/debug', 10)
 
         # fused LiDAR + camera scan, and the raw LiDAR scan as a fallback
         self.create_subscription(LaserScan, 'fused_scan', self.fused_scan_callback, 10)
@@ -699,6 +703,7 @@ class SafetyNode(Node):
         """
         try:
             self.handle_request(msg)
+            self.publish_debug(msg)
         except Exception as exc:
             self.fail_safe('drive request', exc)
 
@@ -871,6 +876,35 @@ class SafetyNode(Node):
             f'slow<{needed * self.SLOW_FACTOR:.2f}s path={nearest:.2f}m cap={cap:.2f}m/s '
             f'obs={obstacle:.1f}m/s lag={1000.0 * source.lag if source else 0.0:.0f}ms '
             f'scan={source.name if source else "none"}')))
+
+    def publish_debug(self, msg: AckermannDriveStamped) -> None:
+        """
+        Publish what was done with a drive request, as one line of JSON.
+
+        Nothing is built or sent unless something is subscribed to safety/debug.
+
+        Fields: t (node clock, s), mode (normal, slow, stale, aeb or stopped), requested
+        (speed asked for, m/s; negative = latched stop request), commanded (last speed sent
+        to /drive, m/s), v (measured speed, m/s), steer (rad), path (nearest point on the
+        path, m), cap (soft-stage speed cap, m/s), ttc and ttc_needed (most urgent point and
+        the AEB threshold there, s), obstacle (its own speed towards us, m/s), scan ('fused',
+        'raw' or 'none'), lag (how late that scan arrived, s), blocked (held at 0 m/s by an
+        obstacle for this long, s). null means none (nothing on the path).
+
+        Args:
+            msg (AckermannDriveStamped): The request that was just handled.
+        """
+        if self.debug_publisher.get_subscription_count() == 0:
+            return
+        nearest, cap, ttc, needed, obstacle = self.last_check
+        source = self.active_source()
+        self.debug_publisher.publish(String(data=encode(
+            t=self.get_clock().now().nanoseconds * 1e-9, mode=self.safety_mode,
+            requested=msg.drive.speed, commanded=self.last_command_speed,
+            v=self.current_speed, steer=self.latest_steering_angle,
+            path=nearest, cap=cap, ttc=ttc, ttc_needed=needed, obstacle=obstacle,
+            scan=source.name if source else 'none', lag=source.lag if source else None,
+            blocked=self.age_seconds(self.blocked_since) if self.blocked_since else 0.0)))
 
     def publish_drive_command(self, speed: float, steering_angle: float) -> None:
         """
