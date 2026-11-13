@@ -454,24 +454,34 @@ class GapFollowNode(Node):
             offset: metres, left positive; 0.0 unless there is a wall within LANE_MAX on
             both sides (beams 45 to 100 degrees each side) and nothing nearer than the
             range cap in the 0.5 m wide strip straight ahead: near a box or a turn the gap
-            target decides alone
+            target decides alone. The side walls themselves do not count as being in that
+            strip (a point within 0.1 m of a wall's line is that wall): close to a wall and
+            angled a little towards it, the wall entered the strip and switched the
+            centring off exactly when it was needed (seen in the car's bag).
         """
-        in_path = ((np.abs(angles) < math.pi / 2) & (ranges > 0.0)
-                   & (ranges < 0.95 * self.MAX_RANGE)
-                   & (np.abs(ranges * np.sin(angles)) < 0.25))
-        if in_path.any():
-            return 0.0
-        sides = []
+        walls = []
         for sign in (1.0, -1.0):
             beside = ((angles * sign >= math.radians(45.0))
                       & (angles * sign <= math.radians(100.0))
                       & (ranges > 0.0) & (ranges < self.MAX_RANGE))
-            lateral = np.abs(ranges[beside] * np.sin(angles[beside]))
-            lateral = lateral[lateral < self.LANE_MAX]
-            if lateral.size < 10:
+            x = ranges[beside] * np.cos(angles[beside])
+            y = np.abs(ranges[beside] * np.sin(angles[beside]))
+            near = y < self.LANE_MAX
+            if np.count_nonzero(near) < 10:
                 return 0.0
-            sides.append(float(np.percentile(lateral, 20)))
-        return 0.5 * (sides[0] - sides[1])
+            x, y = x[near], y[near]
+            slope, lateral = np.polyfit(x, y, 1)        # the wall's line: y = lateral + slope x
+            walls.append((lateral, slope, float(np.percentile(y, 20))))
+        ahead = (np.abs(angles) < math.pi / 2) & (ranges > 0.0) & (ranges < 0.95 * self.MAX_RANGE)
+        x = ranges[ahead] * np.cos(angles[ahead])
+        y = ranges[ahead] * np.sin(angles[ahead])
+        strip = np.abs(y) < 0.25
+        x, y = x[strip], y[strip]
+        (left, left_slope, left_gap), (right, right_slope, right_gap) = walls
+        wall_y = np.where(y >= 0.0, left + left_slope * x, right + right_slope * x)
+        if np.any(np.abs(y) < wall_y - 0.10):           # something in the lane, not a wall
+            return 0.0
+        return 0.5 * (left_gap - right_gap)
 
     def calculate_steering_angle(self, angle: float, distance: float,
                                  lane_offset: float = 0.0) -> float:
