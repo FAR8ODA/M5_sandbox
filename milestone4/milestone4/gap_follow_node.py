@@ -123,6 +123,7 @@ class GapFollowNode(Node):
         self.declare_parameter('side_max_angle_deg', 120.0)
         self.declare_parameter('side_min_range', 0.10)
         self.declare_parameter('side_clear', 0.25)
+        self.declare_parameter('centre_gain', 2.0)
 
         # Speed parameters:
         self.declare_parameter('a_lat', 2.5)
@@ -172,6 +173,8 @@ class GapFollowNode(Node):
         self.SIDE_WARN = 0.15                                # this much earlier: slow down (m)
         self.SIDE_MAX_ANGLE = math.radians(float(p('side_max_angle_deg').value))  # region end
         self.SIDE_MIN_RANGE = float(p('side_min_range').value)  # nearer: the car itself (m)
+        self.CENTRE_GAIN = float(p('centre_gain').value)     # pull to the middle of the lane
+        self.LANE_MAX = 1.5                                  # a side farther away is open (m)
 
         # Speed parameters:
 
@@ -436,7 +439,42 @@ class GapFollowNode(Node):
 
     # [ Step 4 ] steering
 
-    def calculate_steering_angle(self, angle: float, distance: float) -> float:
+    def lane_offset(self, ranges: np.ndarray, angles: np.ndarray) -> float:
+        """
+        How far the middle between the walls beside the car is to its left.
+
+        The gap target alone pulls the car to the middle only weakly, so a small steering
+        pull (servo trim) kept it riding along one wall on the straights.
+
+        Args:
+            ranges: cleaned ranges (0.0 = invalid)
+            angles: angle of each beam (rad)
+
+        Returns:
+            offset: metres, left positive; 0.0 unless there is a wall within LANE_MAX on
+            both sides (beams 45 to 100 degrees each side) and nothing nearer than the
+            range cap in the 0.5 m wide strip straight ahead: near a box or a turn the gap
+            target decides alone
+        """
+        in_path = ((np.abs(angles) < math.pi / 2) & (ranges > 0.0)
+                   & (ranges < 0.95 * self.MAX_RANGE)
+                   & (np.abs(ranges * np.sin(angles)) < 0.25))
+        if in_path.any():
+            return 0.0
+        sides = []
+        for sign in (1.0, -1.0):
+            beside = ((angles * sign >= math.radians(45.0))
+                      & (angles * sign <= math.radians(100.0))
+                      & (ranges > 0.0) & (ranges < self.MAX_RANGE))
+            lateral = np.abs(ranges[beside] * np.sin(angles[beside]))
+            lateral = lateral[lateral < self.LANE_MAX]
+            if lateral.size < 10:
+                return 0.0
+            sides.append(float(np.percentile(lateral, 20)))
+        return 0.5 * (sides[0] - sides[1])
+
+    def calculate_steering_angle(self, angle: float, distance: float,
+                                 lane_offset: float = 0.0) -> float:
         """
         Pure-pursuit steering to a point on the target beam, clamped and smoothed.
 
@@ -450,6 +488,8 @@ class GapFollowNode(Node):
         Args:
             angle: bearing of the target (rad, positive is left)
             distance: range of the target (m)
+            lane_offset: from lane_offset(); the goal point is moved sideways by
+                CENTRE_GAIN times this, towards the middle of the lane
 
         Returns:
             steering_angle: steering angle in radians (positive is left)
@@ -461,7 +501,7 @@ class GapFollowNode(Node):
         # pure pursuit: curvature 2 y / L^2 (Coulter 1992), as in Milestone 3, but from the
         # rear axle, which the car turns about; the LiDAR is LIDAR_X ahead of it
         gx = ld * math.cos(angle) + self.LIDAR_X
-        gy = ld * math.sin(angle)
+        gy = ld * math.sin(angle) + self.CENTRE_GAIN * lane_offset
         curvature = 2.0 * gy / (gx * gx + gy * gy)
         steering = math.atan(self.WHEELBASE * curvature) * self.STEERING_GAIN
 
@@ -742,7 +782,8 @@ class GapFollowNode(Node):
                                    False, 0.0, 0.0)
                 return
             target = (float(angles[index]), float(extended[index]))
-            wanted_steering = self.calculate_steering_angle(*target)
+            wanted_steering = self.calculate_steering_angle(
+                *target, self.lane_offset(ranges, angles))
             beside = self.side_distance(ranges, angles, wanted_steering)
             steering = self.corner_check(ranges, angles, wanted_steering)
 
