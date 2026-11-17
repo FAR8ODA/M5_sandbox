@@ -290,8 +290,9 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
             planner.obstacle_callback(obstacles)
             planner.fused_callback(fused)
             planner.raw_callback(scan)
-            passing_starts += planner.passing and not passing
-            passing = planner.passing
+            now_passing = t < planner.pass_until
+            passing_starts += now_passing and not passing
+            passing = now_passing
             if scan_lag is None:
                 safety.fused_scan_callback(fused)
                 safety.raw_scan_callback(scan)

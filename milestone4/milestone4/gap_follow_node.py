@@ -184,7 +184,6 @@ class GapFollowNode(Node):
         self.box_until: np.ndarray | None = None   # per beam: box label held until (s)
         self.pass_until = -math.inf     # stay in passing mode until this time (s)
         self.fused_time: Time | None = None        # when the last fused scan arrived
-        self.passing = False            # slowing for a confirmed box (on the last scan)
         self.box_where = ''             # where the nearest box ahead was, for gap_follow/debug
 
         # create subscribers and publisher
@@ -816,8 +815,7 @@ class GapFollowNode(Node):
 
             # d. choose the speed and publish
             passing = self.box_ahead(ranges, angles, boxes)
-            self.passing = passing
-            free = self.path_clearance(msg, angles, steering)
+            free =self.path_clearance(msg, angles, steering)
             # the turning side is nearly close enough for corner_check to cancel the turn:
             # the straight path it would switch to must be safe at this speed as well
             straight = None

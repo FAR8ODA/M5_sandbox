@@ -7,7 +7,7 @@ import numpy as np
 import ros_stubs
 
 from milestone4.braking import (car_motion, path_distances, required_ttc,  # noqa: I100
-                                        safe_speed, slow_speed_cap, stopping_distance)
+                                slow_speed_cap)
 
 T_REACT, A_BRAKE, TTC_MARGIN = 0.15, 2.0, 0.1         # the node defaults
 
@@ -51,8 +51,8 @@ class VariableTtcTest(unittest.TestCase):
         """Check the required TTC leaves exactly ttc_margin x closing speed to spare."""
         for v, e in ((1.0, 0.0), (1.5, 1.0), (2.0, 2.5)):
             gap = (v + e) * needed(v, e)
-            used = (stopping_distance(v, T_REACT, A_BRAKE, 0.0)
-                    + e * (T_REACT + v / A_BRAKE))
+            stopping = v * T_REACT + v * v / (2.0 * A_BRAKE)
+            used = stopping + e * (T_REACT + v / A_BRAKE)
             self.assertAlmostEqual(gap - used, TTC_MARGIN * (v + e))
 
     def test_works_on_arrays(self):
@@ -81,19 +81,7 @@ class VariableTtcTest(unittest.TestCase):
 
 
 class BrakingModelTest(unittest.TestCase):
-    """Stopping distance, safe speed, car motion and the path corridor."""
-
-    def test_stopping_distance_grows_with_speed_squared(self):
-        """Check the braking part of the stopping distance scales with v^2."""
-        braking = [stopping_distance(v, 0.0, 2.0, 0.0) for v in (1.0, 2.0)]
-        self.assertAlmostEqual(braking[1] / braking[0], 4.0)
-
-    def test_safe_speed_inverts_stopping_distance(self):
-        """Check safe_speed() is the inverse of stopping_distance()."""
-        for v in (0.5, 1.0, 2.0):
-            d = stopping_distance(v, 0.15, 2.0, 0.0)
-            self.assertAlmostEqual(safe_speed(d, 0.15, 2.0), v)
-        self.assertEqual(safe_speed(-0.1, 0.15, 2.0), 0.0)
+    """Car motion and the path corridor."""
 
     def test_side_walls_are_off_a_straight_path(self):
         # a narrow straight (walls 0.5 m each side); Milestone 3 TTC would brake at 2 m/s

@@ -351,7 +351,7 @@ class BoxLabelDebounceTest(unittest.TestCase):
             t = i * 0.025
             self.label(t, i % 2 == 0)
             self.node.fused_callback(scan)
-            passing.append(self.node.passing)
+            passing.append(t < self.node.pass_until)
         self.assertEqual(sum(now and not before for before, now
                              in zip([False] + passing, passing)), 1)
         self.assertTrue(self.node.box_where.startswith('1.2 m ahead'))

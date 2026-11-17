@@ -250,7 +250,6 @@ class FusionRulesTest(unittest.TestCase):
         # a depth-only object is not a box: no box margin or pass speed for it (on the car,
         # floor that slipped past the floor rejection made the planner slow all lap)
         self.assertFalse(np.isfinite(obstacle).any())
-        self.assertTrue(fuser.trusted[low.beams].all())
 
     def test_reused_camera_frame_does_not_count(self):
         """Check the same camera frame reused by later scans does not build persistence."""

@@ -242,8 +242,7 @@ class ScanFuser:
     Fuse box labels and depth points into LiDAR scans, remembering persistence.
 
     Create once with FusionParams and call fuse() for every LiDAR scan; the
-    per-beam persistence counters carry over between calls. After fuse(),
-    ``trusted`` holds the beams that were filled in from depth.
+    per-beam persistence counters carry over between calls.
     """
 
     def __init__(self, params: FusionParams) -> None:
@@ -254,7 +253,6 @@ class ScanFuser:
         """
         self.params = params
         self.persist: np.ndarray | None = None   # camera frames in a row each beam was seen
-        self.trusted: np.ndarray | None = None   # beams the last fuse() added from depth
 
     def fuse(self, lidar_ranges, range_min: float, range_max: float,
              sources: List[CameraPoints], new_camera_frame: bool = True,
@@ -320,7 +318,6 @@ class ScanFuser:
 
         # write trusted depth points into the fused scan (never farther than the LiDAR)
         fused[trusted] = np.minimum(lidar[trusted], camera_only[trusted])
-        self.trusted = trusted
         return fused, obstacle
 
     @staticmethod
