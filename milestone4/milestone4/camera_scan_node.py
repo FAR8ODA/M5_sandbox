@@ -6,7 +6,6 @@ import cv2
 from cv_bridge import CvBridge
 from milestone4.boundary import mask_scan, ScanResult
 from milestone4.camera_model import CameraModel
-from milestone4.debug_draw import draw_debug
 from milestone4.masks import MaskParams, split_masks
 import numpy as np
 import rclpy
@@ -22,7 +21,8 @@ class CameraScanNode(Node):
     Subscribes to color_topic and color_info_topic (frames before camera_info are
     ignored). Publishes, every frame, camera_box_mask (mono8, every mask_step-th
     pixel, used by fusion_node); and only while subscribed, camera_scan (walls and
-    boxes), camera_box_scan (boxes only) and camera_scan/debug (overlay image).
+    boxes) and camera_box_scan (boxes only), which are used to line the camera up
+    with the LiDAR in rviz.
     """
 
     def __init__(self) -> None:
@@ -59,9 +59,6 @@ class CameraScanNode(Node):
         self.declare_parameter('box_v_min', defaults.box_v_min)
         self.declare_parameter('open_kernel', defaults.open_kernel)
 
-        # Debug overlay is optional; drawn only when this is true and someone is watching.
-        self.declare_parameter('publish_debug', True)
-
         # ROS images become OpenCV arrays. The camera model waits for camera_info.
         self.bridge = CvBridge()
         self.color_cam: Optional[CameraModel] = None
@@ -80,14 +77,13 @@ class CameraScanNode(Node):
             qos_profile_sensor_data
         )
 
-        # The box mask, the two scans, and the debug image beside the main one.
+        # The box mask and the two scans.
         self.mask_publisher = self.create_publisher(
             Image, str(self.get_parameter('box_mask_topic').value), 10)
-        scan_topic = str(self.get_parameter('scan_topic').value)
-        self.scan_publisher = self.create_publisher(LaserScan, scan_topic, 10)
+        self.scan_publisher = self.create_publisher(
+            LaserScan, str(self.get_parameter('scan_topic').value), 10)
         self.box_scan_publisher = self.create_publisher(
             LaserScan, str(self.get_parameter('box_scan_topic').value), 10)
-        self.debug_publisher = self.create_publisher(Image, f'{scan_topic}/debug', 1)
 
     def color_info_callback(self, msg: CameraInfo) -> None:
         """Store the colour camera model. Rebuilt on every camera_info message.
@@ -187,9 +183,9 @@ class CameraScanNode(Node):
             # The box mask is what the fusion node uses: always published.
             self.mask_publisher.publish(self.to_mask_image(box, msg.header))
 
-            # The scans and the debug image are only for viewing and tuning, so they are
-            # built only while someone subscribes; this saves CPU on the Jetson, where a busy
-            # processor makes the LiDAR scans arrive late.
+            # The scans are only for viewing and tuning, so they are built only while
+            # someone subscribes; this saves CPU on the Jetson, where a busy processor
+            # makes the LiDAR scans arrive late.
             if self.box_scan_publisher.get_subscription_count() > 0:
                 # a box must stand on the floor: tan furniture seen above the black ducting
                 # does not, and its floor distance would be wrong
@@ -199,20 +195,11 @@ class CameraScanNode(Node):
                 self.box_scan_publisher.publish(
                     self.to_laserscan(box_result, msg.header.stamp))
 
-            # the combined scan is needed by the debug overlay or a camera_scan subscriber
-            debug = (self.get_parameter('publish_debug').value
-                     and self.debug_publisher.get_subscription_count() > 0)
-            if not debug and self.scan_publisher.get_subscription_count() == 0:
-                return
-            everything = cv2.bitwise_or(wall, box)
-            result = mask_scan(everything, self.color_cam, num_beams, range_max, bottom)
-            self.scan_publisher.publish(self.to_laserscan(result, msg.header.stamp))
-
-            if debug:
-                overlay = draw_debug(bgr, result, self.color_cam, range_max)
-                debug_msg = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
-                debug_msg.header = msg.header
-                self.debug_publisher.publish(debug_msg)
+            # walls and boxes together, for lining the camera up with the LiDAR in rviz
+            if self.scan_publisher.get_subscription_count() > 0:
+                everything = cv2.bitwise_or(wall, box)
+                result = mask_scan(everything, self.color_cam, num_beams, range_max, bottom)
+                self.scan_publisher.publish(self.to_laserscan(result, msg.header.stamp))
 
         except Exception as exc:
             # Publishing nothing makes the fusion node fall back to LiDAR only.

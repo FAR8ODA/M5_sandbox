@@ -60,7 +60,7 @@ def mask_scan(mask: np.ndarray, cam: CameraModel, num_beams: int, range_max: flo
         contact_rows (int): Rows under the lowest pixel checked against not_below.
 
     Returns:
-        ScanResult: Ranges, scan geometry and the mask/boundary for debugging.
+        ScanResult: Ranges, scan geometry, the boundary row of each column and the mask.
     """
     angle_min, angle_max = cam.bearing_limits()
     num_beams = max(2, int(num_beams))                            # need at least 2 beams

@@ -1,6 +1,5 @@
 """Tests for the path-aware AEB safety node."""
 
-import json
 import math
 import unittest
 
@@ -742,50 +741,3 @@ class ScanLagTest(unittest.TestCase):
         for _ in range(5):
             self.node.drive_request_callback(ros_stubs.make_request(0.1, 1.0))
         self.assertEqual(len(calls), 1)                        # once per scan, not per request
-
-
-class DebugTopicTest(unittest.TestCase):
-    """safety/debug: one line of JSON per drive request, only while someone listens."""
-
-    def setUp(self):
-        """Build a safety node and keep its debug publisher."""
-        ros_stubs.CLOCK.seconds = 0.0
-        ros_stubs.PARAM_OVERRIDES.clear()
-        self.node = SafetyNode()
-        self.debug = self.node.publishers_by_topic['safety/debug']
-
-    def request(self, t, ranges, speed, requested):
-        """Feed odometry, a scan and a drive request at time t."""
-        ros_stubs.CLOCK.seconds = t
-        self.node.odom_callback(ros_stubs.make_odom(speed))
-        self.node.fused_scan_callback(ros_stubs.make_scan(ranges, t=t))
-        self.node.drive_request_callback(ros_stubs.make_request(0.0, requested))
-
-    def test_nothing_is_published_without_a_subscriber(self):
-        """Check no debug line is built without a subscriber."""
-        self.request(1.0, ros_stubs.corridor_ranges(1.0), 0.5, 1.0)
-        self.assertEqual(len(self.node.publishers_by_topic['drive'].messages), 1)
-        self.assertEqual(self.debug.messages, [])
-
-    def test_clear_path(self):
-        """Check the debug line on a clear path."""
-        self.debug.subscribers = 1
-        self.request(1.0, ros_stubs.corridor_ranges(1.0), 0.5, 0.8)
-        line = json.loads(self.debug.messages[-1].data)
-        self.assertEqual((line['t'], line['mode'], line['scan']), (1.0, 'normal', 'fused'))
-        self.assertEqual((line['requested'], line['commanded'], line['v']), (0.8, 0.8, 0.5))
-
-    def test_soft_cap_and_aeb_are_explained(self):
-        """Check the debug line explains the soft cap and AEB."""
-        self.debug.subscribers = 1
-        box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 1.0, -0.2, 0.2)
-        self.request(1.0, box, 0.3, 1.0)               # slow car, box 1 m ahead: capped
-        line = json.loads(self.debug.messages[-1].data)
-        self.assertEqual(line['mode'], 'slow')
-        self.assertAlmostEqual(line['path'], 1.0, places=2)
-        self.assertLess(line['commanded'], 1.0)
-        self.assertAlmostEqual(line['commanded'], line['cap'], places=3)
-        self.request(1.025, box, 1.5, 1.0)             # the same box at 1.5 m/s: AEB
-        line = json.loads(self.debug.messages[-1].data)
-        self.assertEqual((line['mode'], line['commanded']), ('aeb', 0.0))
-        self.assertLess(line['ttc'], line['ttc_needed'])

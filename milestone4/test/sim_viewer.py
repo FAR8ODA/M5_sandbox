@@ -71,11 +71,11 @@ def simulate(args):
             USED['deep'] = self.DEEP_FRACTION
             USED['margin'] = self.MARGIN
 
-        def drive_on(self, msg, source):
+        def drive_on(self, msg):
             """Start a record for this scan, run the real planner, then store the record."""
             self._rec = {'scan': np.asarray(msg.ranges, float),
                          'amin': msg.angle_min, 'inc': msg.angle_increment}
-            super().drive_on(msg, source)
+            super().drive_on(msg)
             records[int(round(cl.ros_stubs.CLOCK.seconds * 1000))] = self._rec
 
         def extend_disparities(self, ranges, boxes, inc):

@@ -67,9 +67,8 @@ class LapCounterNode(Node):
     Lap counter that recognises the start from the camera and the LiDAR.
 
     Subscribes to color_topic (if use_camera), scan and ego_racecar/odom. Publishes
-    lap_count (Int32), lap_counter/similarity[_cam|_lidar] (Float32), the debug image
-    lap_counter/debug while subscribed, and after num_laps laps a latched stop
-    (negative speed) on drive_request every 0.1 s.
+    lap_count (Int32), lap_counter/similarity[_cam|_lidar] (Float32), and after
+    num_laps laps a latched stop (negative speed) on drive_request every 0.1 s.
     """
 
     def __init__(self) -> None:
@@ -144,7 +143,6 @@ class LapCounterNode(Node):
         self.lidar_sum = None           # running sum of the reference LiDAR profiles
         self.lidar_count = 0
         self.cam_reference = None       # signature of the starting view (camera)
-        self.reference_thumb = None     # averaged thumbnail of the starting view (debug image)
         self.lidar_reference = None     # signature of the starting view (LiDAR)
         self.thumb = None               # latest thumbnail
         self.thumb_time = None          # when it arrived (s)
@@ -155,7 +153,6 @@ class LapCounterNode(Node):
         self.streak = 0                 # ticks in a row at or above the threshold
         self.peak = None                # best score since the match was confirmed
         self.peak_since = 0.0           # when the match was confirmed (s)
-        self.scores = (None, None, None)  # (combined, camera, lidar) of the last tick
 
         # Odometry distance gate:
 
@@ -183,7 +180,6 @@ class LapCounterNode(Node):
             AckermannDriveStamped,
             'drive_request',
             10)  # latched stop request to the safety node
-        self.debug_publisher = self.create_publisher(Image, 'lap_counter/debug', 1)
 
         # evaluate the score at a fixed rate, and keep repeating the stop once done
         self.create_timer(self.TICK_PERIOD, self.tick)
@@ -305,8 +301,6 @@ class LapCounterNode(Node):
                 self.cam_sum = self.thumb.astype(np.float64) + (
                     self.cam_sum if self.cam_sum is not None else 0.0)
                 self.cam_count += 1
-            if self.debug_publisher.get_subscription_count() > 0:
-                self.publish_debug(bgr, msg)
         except Exception as exc:
             self.get_logger().error(f'lap counter image failed: {exc}', once=True)
 
@@ -444,8 +438,7 @@ class LapCounterNode(Node):
         are counted on the LiDAR only.
         """
         if self.cam_count >= self.LATE_REFERENCE_FRAMES:
-            self.reference_thumb = (self.cam_sum / self.cam_count).astype(np.float32)
-            self.cam_reference = self.image_signature(self.reference_thumb)
+            self.cam_reference = self.image_signature(self.cam_sum / self.cam_count)
 
     def finish_reference(self, now: float) -> None:
         """
@@ -455,8 +448,7 @@ class LapCounterNode(Node):
             now: current time (s)
         """
         if self.cam_count > 0:
-            self.reference_thumb = (self.cam_sum / self.cam_count).astype(np.float32)
-            self.cam_reference = self.image_signature(self.reference_thumb)
+            self.cam_reference = self.image_signature(self.cam_sum / self.cam_count)
         if self.lidar_count > 0:
             self.lidar_reference = self.lidar_signature(self.lidar_sum / self.lidar_count)
         self.phase = 'blind'
@@ -563,7 +555,6 @@ class LapCounterNode(Node):
 
         # b. similarity to the starting view
         score, sim_cam, sim_lidar = self.similarity(now)
-        self.scores = (score, sim_cam, sim_lidar)
         if score is None:
             return
         self.similarity_publisher.publish(Float32(data=float(score)))
@@ -597,47 +588,6 @@ class LapCounterNode(Node):
         """Repeat the stop request after the final lap, in case one message is lost."""
         if self.done:
             self.publish_stop()
-
-    def publish_debug(self, bgr: np.ndarray, msg: Image) -> None:
-        """
-        Publish the frame with the lap count, phase and scores drawn on it.
-
-        Args:
-            bgr: BGR image
-            msg: original Image message, for the header
-        """
-        out = bgr.copy()
-        h, w = out.shape[:2]
-
-        # line above the ignored bottom rows (the car itself)
-        cut = h - self.IGNORE_BOTTOM_ROWS
-        cv2.line(out, (0, cut), (w - 1, cut), (255, 255, 0), 1)
-
-        # reference thumbnail in the top-right corner
-        if self.reference_thumb is not None:
-            lab = np.clip(self.reference_thumb, 0, 255).astype(np.uint8)
-            ref = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-            ref = cv2.resize(ref, (w // 4, h // 4), interpolation=cv2.INTER_NEAREST)
-            out[0:ref.shape[0], w - ref.shape[1]:w] = ref
-
-        # status text: green when the score matches the start, orange otherwise
-        score, sim_cam, sim_lidar = self.scores
-
-        def fmt(x: float | None) -> str:
-            """Return a score with 2 decimals, or 'n/a' for None."""
-            return 'n/a' if x is None else f'{x:.2f}'
-
-        line1 = f'lap {self.laps}/{self.NUM_LAPS}  {self.phase}  armed {self.armed}'
-        line2 = (f'score {fmt(score)}  cam {fmt(sim_cam)}  lidar {fmt(sim_lidar)}  '
-                 f'dist {self.distance - self.lap_start_distance:.1f}/{self.lap_gate():.1f} m')
-        match = score is not None and score >= self.SIMILARITY_THRESHOLD
-        colour = (0, 255, 0) if match else (0, 165, 255)
-        cv2.putText(out, line1, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 2)
-        cv2.putText(out, line2, (8, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 2)
-
-        debug_msg = self.bridge.cv2_to_imgmsg(out, encoding='bgr8')
-        debug_msg.header = msg.header
-        self.debug_publisher.publish(debug_msg)
 
 
 def main(args=None) -> None:
