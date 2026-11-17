@@ -1,6 +1,27 @@
 # CPEN 391 Milestone 4 (Group B4): LiDAR and Camera Fusion
 
-The car laps the track at up to 1.5 m/s (the default top speed), avoids static and moving obstacles, and stops itself after a set number of laps. The **LiDAR is the primary sensor**: it drives the car and triggers emergency braking. The **camera adds what the LiDAR cannot know**: which obstacles are boxes, objects below the LiDAR's scan plane, and a second signature for lap counting.
+
+## Project Overview 
+
+This project improves on our Milestone 2 and 3 implementations by fusing LiDAR and camera data to autonomously navigate the track at up to 1.5 m/s (the default top speed), avoid static and moving obstacles, and automatically stop after a set number of laps.
+
+- The **LiDAR is the primary sensor**: handles path planning and triggers emergency braking. 
+
+- The **camera adds what the LiDAR cannot know**: identifies boxes as obstacles, detect objects below the LiDAR's scan plane, and adds a visual reference for lap counting.
+
+
+## Milestone 4 Improvements
+
+| | Milestones 2 / 3 | Milestone 4 |
+|---|---|---|
+| Driving | MS2: max-gap on LiDAR. MS3: lane following on a camera scan (0.75 m blind zone, ~70° view) | Disparity extender on the 270° LiDAR scan |
+| Speed | Fixed 0.7 m/s | Variable, up to `max_speed` (1.5 m/s by default) |
+| AEB | Fixed 0.65 s TTC on every beam; MS3 used the depth camera, which can't see the black walls | LiDAR, path-aware, speed-dependent TTC plus a soft slow-down stage |
+| Static obstacles | Bubble around nearest point / passing on straights only | Extended disparities everywhere; wider margin and slower pass at confirmed boxes |
+| Dynamic obstacles | Accounts for car's speed only | Optional obstacle-speed tracking |
+| Fusion | Camera *or* LiDAR | LiDAR returns projected into the camera image to label boxes; depth adds low objects |
+| Lap count | Camera only | Camera + LiDAR + odometry gate |
+
 
 ## Quick Start
 
@@ -149,17 +170,6 @@ The lap counter compares the current view with the start:
 
 A lap counts at the peak of the score, only after the car has left the start and has driven `min_lap_distance` (set to about ¾ of a lap) since the last lap. "Left the start" means the score dropped below `rearm_threshold`, or the car drove `rearm_distance_fraction` of that distance: between solid walls the LiDAR score never drops that far, and with the score alone no lap was ever counted.
 
-## Improvements over Milestones 2 and 3
-
-| | Milestones 2 / 3 | Milestone 4 |
-|---|---|---|
-| Driving | MS2: max-gap on LiDAR. MS3: lane following on a camera scan (0.75 m blind zone, ~70° view) | Disparity extender on the 270° LiDAR scan |
-| Speed | Fixed 0.7 m/s | Variable, up to `max_speed` (1.5 m/s by default) |
-| AEB | Fixed 0.65 s TTC on every beam; MS3 used the depth camera, which can't see the black walls | LiDAR, path-aware, speed-dependent TTC plus a soft slow-down stage |
-| Static obstacles | Bubble around nearest point / passing on straights only | Extended disparities everywhere; wider margin and slower pass at confirmed boxes |
-| Dynamic obstacles | Own speed only | Optional obstacle-speed tracking |
-| Fusion | Camera *or* LiDAR | LiDAR returns projected into the camera image to label boxes; depth adds low objects |
-| Lap count | Camera only | Camera + LiDAR + odometry gate |
 
 ## Testing
 
