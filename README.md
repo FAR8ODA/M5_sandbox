@@ -1,6 +1,6 @@
 # CPEN 391 Milestone 4 (Group B4): LiDAR and Camera Fusion
 
-The car laps the track at 1.0–1.5 m/s, avoids static and moving obstacles, and stops itself after a set number of laps. The **LiDAR is the primary sensor**: it drives the car and triggers emergency braking. The **camera adds what the LiDAR cannot know**: which obstacles are boxes, objects below the LiDAR's scan plane, and a second signature for lap counting.
+The car laps the track at up to 1.5 m/s (the default top speed), avoids static and moving obstacles, and stops itself after a set number of laps. The **LiDAR is the primary sensor**: it drives the car and triggers emergency braking. The **camera adds what the LiDAR cannot know**: which obstacles are boxes, objects below the LiDAR's scan plane, and a second signature for lap counting.
 
 ## Quick Start
 
@@ -27,7 +27,6 @@ cd ~/f1tenth_ws && colcon build --packages-select milestone4 && source install/s
 
 - Ctrl+C in terminal 3 stops the car: `safety_node` sends zero speed before it exits.
 - Watch the safety state with `ros2 topic echo /safety/state`.
-- Record a run for debugging: see [Debug topics](#debug-topics).
 - Simulator (LiDAR only): `ros2 launch milestone4 milestone4_py.py use_camera:=false odom_topic:=/ego_racecar/odom`.
 
 ## System Diagram
@@ -79,7 +78,7 @@ flowchart LR
 | `safety_node` | Path-aware AEB with a variable TTC, a soft speed cap, a watchdog and latched stops. Publishes `/drive`. |
 | `lap_counter_node` | Counts laps from camera + LiDAR similarity to the start, gated by odometry distance; requests a latched stop after `num_laps`. |
 
-Helper modules (no ROS code): `braking.py` (shared braking model), `fusion.py`, `camera_model.py`, `masks.py`, `boundary.py`, `depth.py`, `debug_draw.py`.
+Helper modules (no ROS code): `braking.py` (shared braking model), `fusion.py`, `camera_model.py`, `masks.py`, `boundary.py`, `depth.py`. `node_utils.py` holds the few ROS helpers every node shares (clock arithmetic, header stamps and the entry point).
 
 ## Algorithms
 
@@ -119,7 +118,7 @@ Only scan points inside the car's swept path (the steering arc, ±0.20 m) count,
 ```
 ttc      = (distance along path − stop_margin) / v
 T(v)     = t_react + v / (2 · a_brake) + ttc_margin          (time needed to stop)
-AEB      ttc ≤ T(v), at the measured speed — brakes until the TTC is back above T(v)
+AEB      ttc ≤ T(v) at the measured speed; brakes until the TTC is back above T(v)
 soft cap speed limited so that ttc ≥ 2 · T(v)
 ```
 
@@ -131,7 +130,7 @@ soft cap speed limited so that ttc ≥ 2 · T(v)
 
 - The threshold grows with speed, so faster laps brake earlier.
 - The soft cap and the planner's tighter braking limit mean AEB is a last resort.
-- With `track_obstacles:=true`, an obstacle's own approach speed is added: scans are lined up using the car's own motion, so only real movement remains. It is off by default until it is validated on the car.
+- With `track_obstacles:=true`, an obstacle's own approach speed is added: scans are lined up using the car's own motion, so only real movement remains. It is off by default until it is validated on the car. In the simulator, a box pushed at the car at the default 1.5 m/s comes within 0.15 m of it without tracking (the car stops, the box keeps coming); with tracking it stays 0.22 m away.
 
 Other safety behaviour:
 
@@ -155,7 +154,7 @@ A lap counts at the peak of the score, only after the car has left the start and
 | | Milestones 2 / 3 | Milestone 4 |
 |---|---|---|
 | Driving | MS2: max-gap on LiDAR. MS3: lane following on a camera scan (0.75 m blind zone, ~70° view) | Disparity extender on the 270° LiDAR scan |
-| Speed | Fixed 0.7 m/s | Variable, up to `max_speed` (1.0 default, 1.5 tested in simulation) |
+| Speed | Fixed 0.7 m/s | Variable, up to `max_speed` (1.5 m/s by default) |
 | AEB | Fixed 0.65 s TTC on every beam; MS3 used the depth camera, which can't see the black walls | LiDAR, path-aware, speed-dependent TTC plus a soft slow-down stage |
 | Static obstacles | Bubble around nearest point / passing on straights only | Extended disparities everywhere; wider margin and slower pass at confirmed boxes |
 | Dynamic obstacles | Own speed only | Optional obstacle-speed tracking |
@@ -164,18 +163,19 @@ A lap counts at the peak of the score, only after the car has left the start and
 
 ## Testing
 
-- **Unit and closed-loop tests** (`milestone4/test/`, 157 tests): the nodes' callbacks are called directly, with `test/ros_stubs.py` standing in for rclpy and the message types, so no ROS install is needed.
+- **Unit and closed-loop tests** (`milestone4/test/`, 150 tests): the nodes' callbacks are called directly, with `test/ros_stubs.py` standing in for rclpy and the message types, so no ROS install is needed.
   ```bash
   cd milestone4/test
-  python3 -m unittest test_braking test_fusion test_gap_follow test_safety test_lap_counter test_perception test_closed_loop test_params
+  python3 -m unittest test_braking test_fusion test_gap_follow test_safety test_lap_counter test_perception test_closed_loop test_params test_launch
   ```
 
   On the car or VM, `colcon test --packages-select milestone4 && colcon test-result --verbose` runs these plus the style checks.
   - Unit tests: the braking model, fusion rules, disparity extender, AEB cases and lap counting.
   - Parameter file (`test_params.py`): every value in `config/milestone4.yaml` is a parameter its node declares, with the right type, so a typo cannot be silently ignored.
+  - Launch file (`test_launch.py`): command-line arguments reach the right nodes, whichever section of the file the value sits in.
   - Closed-loop simulation (`test/closed_loop.py`, also runnable on its own): all nodes together on a ray-cast track, covering:
-    - 3-lap runs at 1.0 and 1.5 m/s;
-    - boxes;
+    - 3-lap runs at the default 1.5 m/s;
+    - boxes, up to a 2 m/s cap;
     - a box pushed at the car;
     - the lane blocked halfway round by two boxes side by side (gaps narrower than the car): the car stops in front of them and stays stopped;
     - LiDAR dropouts and scan lag;
@@ -197,7 +197,7 @@ A lap counts at the peak of the score, only after the car has left the start and
   The tests only report pass or fail; the viewer shows *why* the car did something. With it we could:
   - see where the car cut a corner or ran close to a wall, and tune `deep_fraction` and `margin` from the command line (`--deep`, `--margin`) before changing the code;
   - check that boxes are passed with room to spare at 1.5 m/s with the realistic car model (steering lag and error, LiDAR offset, noise);
-  - confirm that a blocked lane brings the car to a stop in AEB instead of squeezing through.
+  - confirm that a blocked lane brings the car to a stop instead of squeezing through.
 
   This let us find and fix driving problems before spending time on the track.
 
@@ -205,7 +205,7 @@ A lap counts at the peak of the score, only after the car has left the start and
 
   <img src="sim_boxes.png" alt="Simulator passing boxes" width="100%">
 
-  **Blocked lane: the car stops in AEB:**
+  **Blocked lane: the car stops in front of the boxes:**
 
   <img src="sim_aeb.png" alt="Simulator stopping at a blocked lane" width="100%">
 - **Style**: flake8, pep257 and copyright checks, run by `colcon test`.
@@ -216,50 +216,25 @@ A lap counts at the peak of the score, only after the car has left the start and
   4. `use_camera:=false`, to check LiDAR-only driving.
   5. 3-lap counting.
 
-## Debug Topics
-
-Two topics explain every decision, one line of JSON text (`std_msgs/String`) each. They are only built while something is subscribed (`ros2 topic echo`, `ros2 bag record`), so they cost nothing in a normal run.
-
-| Topic | Published | Fields |
-| --- | --- | --- |
-| `/gap_follow/debug` | once per scan | `t` (scan stamp), `scan` (fused/raw), `gap` (false: no target), `target_deg`, `target_m`, `steer_want` and `steer` (before and after the side check), `beside` (nearest reading beside the turning side), `free` (distance the braking limit used), `free_straight` (set when the side rule checked the straight path), `v` (measured speed), `lim_max`, `lim_brake`, `lim_corner`, `lim_pass`, `limit` (which one set the speed: `max`, `brake`, `corner`, `pass`, `min`, or `ramp` while accelerating), `speed`, `passing`, `boxes` (beams labelled as a box) |
-| `/safety/debug` | once per drive request | `t`, `mode` (normal/slow/stale/aeb/stopped), `requested`, `commanded`, `v`, `steer`, `path` (nearest point on the path), `cap` (soft-stage speed cap), `ttc`, `ttc_needed`, `obstacle` (its own speed), `scan`, `lag` |
-
-Distances are in metres, speeds in m/s, angles in radians (except `target_deg`), times in seconds; `null` means none (nothing on the path, no limit).
-
-Record a run, including the inputs so it can be replayed through the nodes afterwards:
-
-```bash
-ros2 bag record -o run1 /scan /fused_scan /obstacle_scan /drive_request /drive /odom \
-    /gap_follow/debug /safety/debug /safety/state
-```
-
-Add `/camera_box_mask` when the problem is box detection (leave the raw images out: they make the bag large). To get plain text files instead of a bag:
-
-```bash
-ros2 topic echo --field data /gap_follow/debug > gap_follow.txt &
-ros2 topic echo --field data /safety/debug > safety.txt
-```
-
 ## Tuning on the Track
 
 Try a value with a launch argument (`a_brake:=2.4`), then write it into `config/milestone4.yaml` and rebuild so it sticks.
 
 1. **Camera alignment**: overlay `/scan` and `/camera_scan` in rviz; adjust `cam_x` / `cam_yaw_deg` until the walls line up. Measure `cam_z` (camera lens above the LiDAR's scan plane) with a ruler. Then put a box 1–3 m ahead and check that `/obstacle_scan` marks its whole face and nothing else.
 2. **Braking**: let AEB stop the car from a known speed v, measure the stopping distance d, and set `a_brake = v² / (2d)`.
-3. **Speed**: raise `max_speed` 1.0 → 1.25 → 1.5, watching `/safety/state` for unwanted `slow` or `aeb`; then tune `a_lat`.
+3. **Speed**: the default `max_speed` is 1.5. On a new track, start lower (`max_speed:=1.0`, then 1.25, then 1.5), watching `/safety/state` for unwanted `slow` or `aeb`; then tune `a_lat`.
 4. **Lap distance**: read the lap length from the `Lap 1/3 (... m driven)` log and set `min_lap_distance` to about ¾ of it.
 
 ## Parameters and Launch Arguments
 
-Every parameter of every node is in `milestone4/config/milestone4.yaml`, the single place to tune the car. Values shared by several nodes (car geometry, the braking model, timeouts, camera mounting) sit once in its `/**` section, so the planner and the safety node can never use different braking models. Keep the decimal point on decimal values (`1.0`, not `1`): ROS parameters are typed.
+Every parameter of every node is in `milestone4/config/milestone4.yaml`, the single place to tune the car. Values shared by several nodes (top speed, car geometry, the braking model, timeouts, camera mounting) sit once in its `/**` section, so the planner and the safety node can never use different speeds or braking models. Keep the decimal point on decimal values (`1.0`, not `1`): ROS parameters are typed.
 
 Launch arguments override the file for one run, e.g. `max_speed:=1.25`. Tuning arguments not given on the command line leave the file's value. Use `params_file:=/path/to/copy.yaml` to launch with a different file.
 
 | Argument | File value | Description |
 |---|---|---|
-| `max_speed` | 1.0 | Top speed, also the safety node's cap (m/s) |
-| `pass_speed` | 0.8 | Speed while passing a confirmed box (m/s) |
+| `max_speed` | 1.5 | Top speed, also the safety node's cap (m/s) |
+| `pass_speed` | 1.2 | Speed while passing a confirmed box (m/s) |
 | `lookahead` / `gain` / `smoothing` | 2.0 / 1.0 / 0.6 | Pure pursuit distance (m), gain, steering smoothing |
 | `a_lat` | 2.5 | Cornering grip (m/s²) |
 | `margin` | 0.20 | Clearance beyond half the car at edges (m) |
