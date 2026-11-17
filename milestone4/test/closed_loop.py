@@ -6,6 +6,8 @@ around a simulated track via run(). Run directly for a lap report:
     cd milestone4/test && python3 closed_loop.py
 """
 
+from __future__ import annotations
+
 import math
 import random
 
@@ -34,7 +36,8 @@ REALISTIC_CAR = {'servo_lag': 0.1, 'steer_gain': 1.0, 'steer_offset': 0.0,
 UNCALIBRATED_CAR = dict(REALISTIC_CAR, steer_gain=0.8, steer_offset=0.03)
 
 
-def stadium_track(straight=6.0, radius=2.0, half_lane=0.6, step=ros_stubs.WALL_STEP):
+def stadium_track(straight=6.0, radius=2.0, half_lane=0.6,
+                  step=ros_stubs.WALL_STEP) -> tuple[np.ndarray, float]:
     """
     Return dense wall points of a stadium track and the length of its centreline.
 
@@ -65,7 +68,7 @@ def stadium_track(straight=6.0, radius=2.0, half_lane=0.6, step=ros_stubs.WALL_S
     return world, 2.0 * straight + 2.0 * math.pi * radius
 
 
-def box(cx, cy, size=0.4, step=ros_stubs.WALL_STEP):
+def box(cx, cy, size=0.4, step=ros_stubs.WALL_STEP) -> np.ndarray:
     """
     Return dense points around a square box.
 
@@ -84,7 +87,7 @@ def box(cx, cy, size=0.4, step=ros_stubs.WALL_STEP):
     return np.vstack(sides)
 
 
-def blocking_boxes(radius=2.0, x=0.0):
+def blocking_boxes(radius=2.0, x=0.0) -> np.ndarray:
     """
     Return two boxes side by side across the middle of the far straight (halfway round).
 
@@ -103,7 +106,8 @@ def blocking_boxes(radius=2.0, x=0.0):
     return np.vstack([box(x, centre - 0.2), box(x, centre + 0.2)])
 
 
-def depth_scan(points, x, y, yaw, t, fov=math.radians(87.0), beams=90, range_max=2.5):
+def depth_scan(points, x, y, yaw, t, fov=math.radians(87.0), beams=90,
+               range_max=2.5) -> ros_stubs.LaserScan:
     """
     Return the simulated depth camera LaserScan of points seen from a car pose.
 
@@ -135,7 +139,8 @@ def depth_scan(points, x, y, yaw, t, fov=math.radians(87.0), beams=90, range_max
                                range_min=0.15, range_max=range_max, t=t)
 
 
-def box_labels(scan, box_centres, x, y, yaw, t, probability, rng, half_size=0.2):
+def box_labels(scan, box_centres, x, y, yaw, t, probability, rng,
+               half_size=0.2) -> ros_stubs.LaserScan:
     """
     Return a simulated /obstacle_scan: the beams that hit a box, labelled with a probability.
 
@@ -169,12 +174,12 @@ def box_labels(scan, box_centres, x, y, yaw, t, probability, rng, half_size=0.2)
     return ros_stubs.make_scan(out, t=t)
 
 
-def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
+def run(world, num_laps=2, max_speed=1.5, min_lap_distance=10.0, max_time=80.0,
         a_brake=2.0, accel=3.0, lidar_dropout=None, low_obstacles=None, use_camera=False,
         servo_lag=0.0, box_centres=None, label_probability=1.0, seed=1, scan_lag=None,
         steer_gain=1.0, steer_offset=0.0, lidar_offset=0.0, range_noise=0.0,
         steer_delay=0.0, odom_noise=0.0, track_obstacles=None, margin=None, smoothing=None,
-        planner=None, car_brake=None, drive_delay=0.0, lidar_to_bumper=0.15):
+        planner=None, car_brake=None, drive_delay=0.0, lidar_to_bumper=0.15) -> dict:
     """
     Drive the nodes around a world until the lap counter stops the car (or max_time).
 
@@ -222,7 +227,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
     ros_stubs.PARAM_OVERRIDES.update({
         'fusion_node': {'use_camera': use_camera, 'use_depth': use_camera},
         'gap_follow_node': {'max_speed': max_speed},
-        'safety_node': {'drive_speed': max_speed, 'a_brake': a_brake},
+        'safety_node': {'max_speed': max_speed, 'a_brake': a_brake},
         'lap_counter_node': {'use_camera': False, 'num_laps': num_laps,
                              'min_lap_distance': min_lap_distance},
     })
@@ -239,7 +244,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
     fusion, planner, safety, laps = FusionNode(), GapFollowNode(), SafetyNode(), LapCounterNode()
     ros_stubs.PARAM_OVERRIDES.clear()
 
-    def last(node, topic):
+    def last(node, topic) -> object:
         """Return the last message a node published on a topic, or None."""
         messages = node.publishers_by_topic[topic].messages
         return messages[-1] if messages else None
@@ -290,8 +295,9 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
             planner.obstacle_callback(obstacles)
             planner.fused_callback(fused)
             planner.raw_callback(scan)
-            passing_starts += planner.passing and not passing
-            passing = planner.passing
+            now_passing = t < planner.pass_until
+            passing_starts += now_passing and not passing
+            passing = now_passing
             if scan_lag is None:
                 safety.fused_scan_callback(fused)
                 safety.raw_scan_callback(scan)
@@ -354,7 +360,8 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
         dx, dy = solid[:, 0] - x, solid[:, 1] - y
         ahead = dx * math.cos(yaw) + dy * math.sin(yaw)
         left = -dx * math.sin(yaw) + dy * math.cos(yaw)
-        out_x = np.maximum(np.maximum(-0.05 - ahead, ahead - (lidar_offset + lidar_to_bumper)), 0.0)
+        bumper = lidar_offset + lidar_to_bumper
+        out_x = np.maximum(np.maximum(-0.05 - ahead, ahead - bumper), 0.0)
         out_y = np.maximum(np.abs(left) - CAR_HALF_WIDTH, 0.0)
         inside = (out_x == 0.0) & (out_y == 0.0)
         gap = float(np.min(np.where(inside, -1.0, np.hypot(out_x, out_y))))
@@ -378,7 +385,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
                       ('laps', laps))}}
 
 
-def report(name, result, lap_length):
+def report(name, result, lap_length) -> None:
     """
     Print a short summary of a run.
 

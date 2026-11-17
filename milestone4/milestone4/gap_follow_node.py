@@ -14,14 +14,13 @@ import math
 
 from ackermann_msgs.msg import AckermannDriveStamped
 from milestone4.braking import path_distances, slow_speed_cap
-from milestone4.debug_log import encode
+from milestone4.fusion import clean_lidar
+from milestone4.node_utils import now_seconds, run_node, seconds_since
 from nav_msgs.msg import Odometry
 import numpy as np
-import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
 
 
 # Disparity Extender (UNC Chapel Hill, F1TENTH CPSWeek 2019; lecture slides 23-30)
@@ -36,30 +35,14 @@ from std_msgs.msg import String
 # [ Step 4 ] cornering: never turn into something beside the car
 
 
-def describe(distance: float, angle: float) -> str:
-    """
-    Describe where a point is, for gap_follow/debug, e.g. '0.9 m ahead, 35 deg left'.
-
-    Args:
-        distance (float): Range (m).
-        angle (float): Bearing (rad, positive is left).
-
-    Returns:
-        str: Distance and side.
-    """
-    degrees = math.degrees(angle)
-    side = 'straight' if abs(degrees) < 2.0 else ('left' if degrees > 0.0 else 'right')
-    return f'{distance:.1f} m ahead, {abs(degrees):.0f} deg {side}'
-
-
 class GapFollowNode(Node):
     """
     Disparity-extender controller on the fused LiDAR scan.
 
     Subscribes to fused_scan (raw scan used only while it is stale), obstacle_scan
     (box labels) and ego_racecar/odom. Publishes AckermannDriveStamped requests on
-    drive_request (the safety node caps the speed, applies AEB and stops the car if
-    these messages stop) and JSON decisions on gap_follow/debug while subscribed.
+    drive_request; the safety node caps the speed, applies AEB and stops the car if
+    these messages stop.
     """
 
     def __init__(self) -> None:
@@ -67,7 +50,7 @@ class GapFollowNode(Node):
         super().__init__('gap_follow_node')
 
         # Main tuning parameters (values in config/milestone4.yaml):
-        self.declare_parameter('max_speed', 1.0)
+        self.declare_parameter('max_speed', 1.5)
         self.declare_parameter('min_speed', 0.35)
         self.declare_parameter('pass_speed', 0.8)
         self.declare_parameter('gain', 1.0)
@@ -178,21 +161,16 @@ class GapFollowNode(Node):
         self.measured_speed = 0.0       # speed from odometry (m/s), sets the lookahead
         self.odom_time: Time | None = None         # when odometry last arrived
         self.target_angle = 0.0         # bearing of the last target (rad)
-        self.obstacles: np.ndarray | None = None   # latest /obstacle_scan ranges
-        self.obstacle_time: Time | None = None     # when it arrived
         self.label_history: deque = deque(maxlen=3)  # recent raw box labels (per beam)
         self.box_until: np.ndarray | None = None   # per beam: box label held until (s)
         self.pass_until = -math.inf     # stay in passing mode until this time (s)
         self.fused_time: Time | None = None        # when the last fused scan arrived
-        self.passing = False            # slowing for a confirmed box (on the last scan)
-        self.box_where = ''             # where the nearest box ahead was, for gap_follow/debug
 
         # create subscribers and publisher
         self.publisher_ = self.create_publisher(
             AckermannDriveStamped,
             'drive_request',
             10)  # steering + speed request, safety node caps the speed
-        self.debug_publisher = self.create_publisher(String, 'gap_follow/debug', 10)
 
         self.create_subscription(LaserScan, 'fused_scan', self.fused_callback, 10)
         self.create_subscription(LaserScan, 'scan', self.raw_callback, 10)
@@ -200,20 +178,6 @@ class GapFollowNode(Node):
         self.create_subscription(Odometry, 'ego_racecar/odom', self.odom_callback, 10)
 
     # Inputs
-
-    def age(self, stamp: Time | None) -> float:
-        """
-        Return the seconds elapsed since a stamp.
-
-        Args:
-            stamp (Time | None): Earlier node-clock time, or None if never set.
-
-        Returns:
-            float: Age in seconds, inf if stamp is None.
-        """
-        if stamp is None:
-            return math.inf
-        return (self.get_clock().now() - stamp).nanoseconds * 1e-9
 
     def odom_callback(self, msg: Odometry) -> None:
         """
@@ -227,7 +191,7 @@ class GapFollowNode(Node):
 
     def lookahead_speed(self) -> float:
         """
-        Speed that sets the pure-pursuit lookahead.
+        Return the speed used to size the pure-pursuit lookahead.
 
         The car's measured speed, which only drops as fast as the car can brake. Using the
         requested speed instead made the lookahead collapse the moment the planner asked to
@@ -236,7 +200,7 @@ class GapFollowNode(Node):
         Returns:
             speed: odometry speed, or the previous request if odometry is stale (m/s)
         """
-        if self.age(self.odom_time) <= self.ODOM_TIMEOUT:
+        if seconds_since(self, self.odom_time) <= self.ODOM_TIMEOUT:
             return self.measured_speed
         return self.previous_speed
 
@@ -252,11 +216,10 @@ class GapFollowNode(Node):
         Args:
             msg: /obstacle_scan from the fusion node
         """
-        self.obstacles = np.asarray(msg.ranges, dtype=float)
-        self.obstacle_time = self.get_clock().now()
         # a finite, positive range means the fusion node labelled that beam a box
+        obstacles = np.asarray(msg.ranges, dtype=float)
         with np.errstate(invalid='ignore'):
-            raw = np.isfinite(self.obstacles) & (self.obstacles > 0.0)
+            raw = np.isfinite(obstacles) & (obstacles > 0.0)
         # the scan size changed: the old history no longer lines up beam for beam
         if self.label_history and self.label_history[-1].size != raw.size:
             self.label_history.clear()
@@ -266,34 +229,34 @@ class GapFollowNode(Node):
         needed = min(2, len(self.label_history))
         votes = np.sum(np.stack(list(self.label_history)), axis=0) >= needed
         # voted beams are held as boxes until BOX_HOLD seconds from now
-        now = self.obstacle_time.nanoseconds * 1e-9
+        now = now_seconds(self)
         if self.box_until is None:
             self.box_until = np.full(raw.size, -math.inf)
         self.box_until = np.where(votes, now + self.BOX_HOLD, self.box_until)
 
     def fused_callback(self, msg: LaserScan) -> None:
         """
-        Drive on the fused scan (the normal case).
+        Plan a drive request from a fused scan (the normal case), noting when it arrived.
 
         Args:
             msg (LaserScan): Scan from fusion_node.
         """
         self.fused_time = self.get_clock().now()
-        self.drive_on(msg, 'fused')
+        self.drive_on(msg)
 
     def raw_callback(self, msg: LaserScan) -> None:
         """
-        Drive on the raw LiDAR scan only while the fused scan is stale (SCAN_TIMEOUT).
+        Plan from the raw LiDAR scan, but only while the fused scan is stale (SCAN_TIMEOUT).
 
         Args:
             msg (LaserScan): Raw scan from the LiDAR.
         """
-        if self.age(self.fused_time) > self.SCAN_TIMEOUT:
-            self.drive_on(msg, 'raw')
+        if seconds_since(self, self.fused_time) > self.SCAN_TIMEOUT:
+            self.drive_on(msg)
 
     def box_beams(self, num_beams: int) -> np.ndarray:
         """
-        Beams of the current scan that count as camera-confirmed boxes (debounced).
+        Return which beams of the current scan count as camera-confirmed boxes (debounced).
 
         Args:
             num_beams (int): Number of beams in the scan being processed.
@@ -303,7 +266,7 @@ class GapFollowNode(Node):
         """
         if self.box_until is None or self.box_until.size != num_beams:
             return np.zeros(num_beams, dtype=bool)
-        return self.box_until > self.get_clock().now().nanoseconds * 1e-9
+        return self.box_until > now_seconds(self)
 
     # [ Step 1 ] clean the scan
 
@@ -449,7 +412,7 @@ class GapFollowNode(Node):
 
     def lane_offset(self, ranges: np.ndarray, angles: np.ndarray) -> float:
         """
-        How far the middle between the walls beside the car is to its left.
+        Measure how far the middle of the lane, between the walls beside the car, is to its left.
 
         The gap target alone pulls the car to the middle only weakly, so a small steering
         pull (servo trim) kept it riding along one wall on the straights.
@@ -497,7 +460,7 @@ class GapFollowNode(Node):
     def calculate_steering_angle(self, angle: float, distance: float,
                                  lane_offset: float = 0.0) -> float:
         """
-        Pure-pursuit steering to a point on the target beam, clamped and smoothed.
+        Steer towards a point on the target beam with pure pursuit, then clamp and smooth it.
 
         The disparity extender guarantees the car can drive straight along the target beam,
         so the car must turn onto that beam before it reaches the obstacle beside it. The
@@ -534,30 +497,32 @@ class GapFollowNode(Node):
         self.previous_steering = steering
         return steering
 
-    def corner_check(self, ranges: np.ndarray, angles: np.ndarray, steering: float) -> float:
+    def corner_check(self, steering: float, beside: float) -> float:
         """
         Go straight instead of turning into something right beside the car (Tweak 3).
 
-        Uses the LiDAR beams between ±SIDE_ANGLE and ±SIDE_MAX_ANGLE, beside the car, which
-        the camera cannot see. Further back the beams can hit the car's own body, and any
-        reading nearer than SIDE_MIN_RANGE is the car itself, so both are left out.
+        The smoothing memory is cleared too, so the next command does not swing straight
+        back into the turn.
 
         Args:
-            ranges: cleaned ranges (0.0 = invalid)
-            angles: angle of each beam (rad)
             steering: steering angle about to be sent (rad)
+            beside: nearest reading on the turning side, from side_distance() (m)
 
         Returns:
-            steering: unchanged, or 0.0 if the turning side is too close
+            steering: unchanged, or 0.0 if the turning side is nearer than SIDE_CLEAR
         """
-        if self.side_distance(ranges, angles, steering) < self.SIDE_CLEAR:
+        if beside < self.SIDE_CLEAR:
             self.previous_steering = 0.0
             return 0.0
         return steering
 
     def side_distance(self, ranges: np.ndarray, angles: np.ndarray, steering: float) -> float:
         """
-        Nearest thing beside the car on the side it is turning to.
+        Return the nearest reading beside the car on the side it is turning to.
+
+        Uses the LiDAR beams between ±SIDE_ANGLE and ±SIDE_MAX_ANGLE, beside the car, which
+        the camera cannot see. Further back the beams can hit the car's own body, and any
+        reading nearer than SIDE_MIN_RANGE is the car itself, so both are left out.
 
         Args:
             ranges: cleaned ranges (0.0 = invalid)
@@ -581,7 +546,7 @@ class GapFollowNode(Node):
 
     def path_clearance(self, scan: LaserScan, angles: np.ndarray, steering: float) -> float:
         """
-        Free distance along the arc the car is about to drive (the planned path).
+        Return the free distance along the arc the car is about to drive (the planned path).
 
         Uses the scan without the MAX_RANGE cap (a far wall is not an obstacle at 5 m) and the
         same corridor as the safety node (half the car plus path_margin). A wider one made the
@@ -596,10 +561,7 @@ class GapFollowNode(Node):
             free: distance along the path to the nearest point on it (m), inf if none
         """
         # uncapped ranges, invalid readings set to inf (never on the path)
-        ranges = np.asarray(scan.ranges, dtype=float)
-        with np.errstate(invalid='ignore'):
-            bad = ~np.isfinite(ranges) | (ranges < scan.range_min) | (ranges > scan.range_max)
-        ranges = np.where(bad, np.inf, ranges)
+        ranges = clean_lidar(scan.ranges, scan.range_min, scan.range_max)
         _, along = path_distances(ranges, angles, steering, self.WHEELBASE, self.CORRIDOR)
         return float(along.min()) if along.size else math.inf
 
@@ -621,17 +583,14 @@ class GapFollowNode(Node):
         # confirmed box beams in view and within BOX_SLOW_RANGE
         near = (boxes & (np.abs(angles) <= self.FOV)
                 & (ranges > 0.0) & (ranges < self.BOX_SLOW_RANGE))
-        now = self.get_clock().now().nanoseconds * 1e-9
+        now = now_seconds(self)
         if near.any():
-            # restart the hold and remember where the nearest box is, for the debug topic
-            self.pass_until = now + self.PASS_HOLD
-            i = int(np.argmin(np.where(near, ranges, np.inf)))
-            self.box_where = describe(float(ranges[i]), float(angles[i]))
+            self.pass_until = now + self.PASS_HOLD       # restart the hold
         return now < self.pass_until
 
     def braking_limit(self, free: float) -> float:
         """
-        Highest speed that keeps the TTC to the path PLAN_FACTOR times the TTC needed to stop.
+        Return the highest speed that keeps PLAN_FACTOR x the TTC needed to stop.
 
         PLAN_FACTOR is a little more than the safety node's slow_factor, so the planner
         always asks for a speed the safety node will not have to cut.
@@ -649,7 +608,7 @@ class GapFollowNode(Node):
 
     def cornering_limit(self, steering: float) -> float:
         """
-        Highest speed the tyres can hold on the arc of a steering angle.
+        Return the highest speed the tyres can hold on the arc of a steering angle.
 
         Sideways acceleration is v^2 * curvature, with curvature = tan(steering) / wheelbase,
         so v = sqrt(A_LAT / curvature).
@@ -665,7 +624,7 @@ class GapFollowNode(Node):
 
     def calculate_speed(self, free: float, steering: float, passing: bool) -> float:
         """
-        Speed request (variable speed): the lowest of the physical limits.
+        Pick the speed to request: the lowest of the physical limits (variable speed).
 
         MAX_SPEED, the braking limit for the free distance on the planned path, the
         cornering limit for the steering angle, and PASS_SPEED while passing a box.
@@ -697,9 +656,8 @@ class GapFollowNode(Node):
             speed: speed to request now (m/s)
         """
         # time since the last request (0.025 s = one 40 Hz scan the first time), capped at 0.1 s
-        now = self.get_clock().now()
-        dt = 0.025 if self.speed_time is None else (now - self.speed_time).nanoseconds * 1e-9
-        self.speed_time = now
+        dt = 0.025 if self.speed_time is None else seconds_since(self, self.speed_time)
+        self.speed_time = self.get_clock().now()
         return min(speed, self.previous_speed + self.A_ACCEL * min(max(dt, 0.0), 0.1))
 
     def publish_drive(self, steering_angle: float, speed: float) -> None:
@@ -716,65 +674,7 @@ class GapFollowNode(Node):
         drive_msg.drive.speed = float(speed)
         self.publisher_.publish(drive_msg)
 
-    def publish_debug(self, msg: LaserScan, source: str, target: tuple[float, float] | None,
-                      wanted_steering: float, steering: float, beside: float, free: float,
-                      straight: float | None, passing: bool, wanted: float,
-                      speed: float) -> None:
-        """
-        Publish why this steering and speed were chosen, as one line of JSON.
-
-        Nothing is built or sent unless something is subscribed to gap_follow/debug.
-
-        Fields: t (scan stamp, s), scan ('fused' or 'raw'), gap (False if no target was
-        found; the rest is then left out), target_deg and target_m (bearing, left positive,
-        and range of the target), steer_want and steer (rad, before and after the side
-        check), beside (nearest reading beside the turning side, m), free (distance used for
-        the braking limit, m), free_straight (straight-path distance, when the side rule
-        looked at it, m), v (measured speed, m/s), lim_max / lim_brake / lim_corner /
-        lim_pass (each speed limit, m/s; null = no limit), limit (which one set the speed:
-        max, brake, corner, pass, min = lifted to min_speed, ramp = still accelerating),
-        speed (requested, m/s), passing, box (while passing: where the nearest confirmed box
-        ahead was, e.g. '0.9 m ahead, 30 deg left'), boxes (beams labelled as a box).
-
-        Args:
-            msg: the scan that was processed
-            source: 'fused' or 'raw'
-            target: (bearing in rad, range in m) of the target, or None if there is no gap
-            wanted_steering: steering before the side check (rad)
-            steering: steering that was sent (rad)
-            beside: nearest reading beside the turning side (m)
-            free: free distance the braking limit used (m)
-            straight: free distance straight ahead if the side rule checked it, else None (m)
-            passing: True while passing a confirmed box
-            wanted: speed before the acceleration ramp (m/s)
-            speed: speed that was sent (m/s)
-        """
-        if self.debug_publisher.get_subscription_count() == 0:
-            return
-        t = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
-        if target is None:
-            self.debug_publisher.publish(String(data=encode(t=t, scan=source, gap=False)))
-            return
-        limits = {'max': self.MAX_SPEED, 'brake': self.braking_limit(free),
-                  'corner': self.cornering_limit(steering),
-                  'pass': self.PASS_SPEED if passing else math.inf}
-        # the lowest limit set the speed, unless the ramp held it lower or min_speed lifted it
-        limit = min(limits, key=limits.get)
-        if speed < wanted - 1e-9:
-            limit = 'ramp'
-        elif wanted > limits[limit] + 1e-9:
-            limit = 'min'
-        self.debug_publisher.publish(String(data=encode(
-            t=t, scan=source, gap=True,
-            target_deg=math.degrees(target[0]), target_m=target[1],
-            steer_want=wanted_steering, steer=steering, beside=beside,
-            free=free, free_straight=straight, v=self.lookahead_speed(),
-            lim_max=limits['max'], lim_brake=limits['brake'], lim_corner=limits['corner'],
-            lim_pass=limits['pass'], limit=limit, speed=speed, passing=bool(passing),
-            box=self.box_where if passing else None,
-            boxes=int(np.count_nonzero(self.box_beams(len(msg.ranges)))))))
-
-    def drive_on(self, msg: LaserScan, source: str) -> None:
+    def drive_on(self, msg: LaserScan) -> None:
         """
         Run the disparity extender on one scan and publish the drive request.
 
@@ -789,7 +689,6 @@ class GapFollowNode(Node):
 
         Args:
             msg: fused (or raw) LaserScan
-            source: 'fused' or 'raw', for gap_follow/debug
         """
         try:
             # a. preprocess the scan
@@ -804,54 +703,31 @@ class GapFollowNode(Node):
             # c. find the target and steer to it
             index = self.find_target(extended, angles)
             if index is None:
-                # no gap: nothing is published, and the safety node's watchdog brakes
-                self.publish_debug(msg, source, None, 0.0, 0.0, math.inf, math.inf, None,
-                                   False, 0.0, 0.0)
-                return
-            target = (float(angles[index]), float(extended[index]))
+                return          # no gap: nothing is published, and the safety watchdog brakes
             wanted_steering = self.calculate_steering_angle(
-                *target, self.lane_offset(ranges, angles))
+                float(angles[index]), float(extended[index]), self.lane_offset(ranges, angles))
             beside = self.side_distance(ranges, angles, wanted_steering)
-            steering = self.corner_check(ranges, angles, wanted_steering)
+            steering = self.corner_check(wanted_steering, beside)
 
             # d. choose the speed and publish
             passing = self.box_ahead(ranges, angles, boxes)
-            self.passing = passing
             free = self.path_clearance(msg, angles, steering)
             # the turning side is nearly close enough for corner_check to cancel the turn:
             # the straight path it would switch to must be safe at this speed as well
-            straight = None
             if beside < self.SIDE_CLEAR + self.SIDE_WARN:
-                straight = self.path_clearance(msg, angles, 0.0)
-                free = min(free, straight)
-            wanted = self.calculate_speed(free, steering, passing)
-            speed = self.ramp(wanted)
+                free = min(free, self.path_clearance(msg, angles, 0.0))
+            speed = self.ramp(self.calculate_speed(free, steering, passing))
             self.previous_speed = speed
             self.publish_drive(steering, speed)
-            self.publish_debug(msg, source, target, wanted_steering, steering, beside, free,
-                               straight, passing, wanted, speed)
 
         # error logging (once: the watchdog stops the car if no requests follow)
         except Exception as exc:
             self.get_logger().error(f'gap follow failed: {exc}', once=True)
 
 
-def main(args=None) -> None:
-    """
-    Run the gap follow node until interrupted (console entry point).
-
-    Args:
-        args: Command-line arguments passed to rclpy.init (None = sys.argv).
-    """
-    rclpy.init(args=args)                   # initialize ROS 2
-    gap_follow_node = GapFollowNode()       # creates GapFollowNode instance
-    try:
-        rclpy.spin(gap_follow_node)         # spin the node running + callback
-    except KeyboardInterrupt:
-        pass
-    gap_follow_node.destroy_node()          # clears up the node
-    if rclpy.ok():
-        rclpy.shutdown()                    # shut down ROS2 (skip if Ctrl+C already did)
+def main() -> None:
+    """Run the gap follow node until Ctrl+C (console entry point)."""
+    run_node(GapFollowNode)
 
 
 if __name__ == '__main__':

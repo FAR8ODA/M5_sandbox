@@ -16,7 +16,8 @@ import time
 
 from ackermann_msgs.msg import AckermannDriveStamped
 from milestone4.braking import car_motion, path_distances, required_ttc, slow_speed_cap
-from milestone4.debug_log import encode
+from milestone4.fusion import clean_lidar
+from milestone4.node_utils import now_seconds, seconds_since, stamp_seconds
 from nav_msgs.msg import Odometry
 import numpy as np
 import rclpy
@@ -40,7 +41,7 @@ class MotionTracker:
                  max_speed: float = 6.0, bin_width: float = math.radians(0.25),
                  smooth_tol: float = 0.1) -> None:
         """
-        Store the settings.
+        Store the tracking settings and start with no scan history.
 
         Args:
             baseline (float): Compare with a scan at least this old (s); a longer baseline
@@ -180,7 +181,7 @@ class ScanSource:
 
     def __init__(self, name: str, persist_scans: int = 4) -> None:
         """
-        Start empty.
+        Start with no scan stored yet.
 
         Args:
             name (str): 'fused' or 'raw'.
@@ -207,15 +208,15 @@ class SafetyNode(Node):
 
     Subscribes to fused_scan (raw scan as fallback), ego_racecar/odom and drive_request
     (steering + speed; negative speed = latched stop). Publishes the final command on
-    drive, the mode and last check on safety/state, and JSON decisions on safety/debug
-    while subscribed. Modes: normal, slow, stale, aeb and stopped (latched).
+    drive and the mode and last check on safety/state. Modes: normal, slow, stale, aeb
+    and stopped (latched).
     """
 
     # Extra time added to the time the car needs to stop (seconds).
     TTC_MARGIN = 0.1
 
     # Highest speed ever commanded (m/s).
-    DRIVE_SPEED = 1.0
+    MAX_SPEED = 1.5
 
     # Brake if drive requests or scans are older than this (seconds).
     STALE_TIMEOUT = 0.25
@@ -229,7 +230,7 @@ class SafetyNode(Node):
 
         # Values come from config/milestone4.yaml; the class constants are fallbacks.
         self.declare_parameter('ttc_margin', self.TTC_MARGIN)
-        self.declare_parameter('drive_speed', self.DRIVE_SPEED)
+        self.declare_parameter('max_speed', self.MAX_SPEED)
         self.declare_parameter('stale_timeout', self.STALE_TIMEOUT)
 
         # Braking model and corridor (tune a_brake from a measured stop: a = v^2 / (2 d)).
@@ -251,7 +252,7 @@ class SafetyNode(Node):
         # read the parameters once, clamped to sensible ranges
         p = self.get_parameter
         self.TTC_MARGIN = max(0.0, float(p('ttc_margin').value))
-        self.drive_speed = float(p('drive_speed').value)
+        self.max_speed = float(p('max_speed').value)
         self.stale_timeout = float(p('stale_timeout').value)
         self.A_BRAKE = max(0.1, float(p('a_brake').value))
         self.T_REACT = max(0.0, float(p('t_react').value))
@@ -291,7 +292,6 @@ class SafetyNode(Node):
         # note: only safety_node publishes to /drive.
         self.drive_publisher = self.create_publisher(AckermannDriveStamped, 'drive', 10)
         self.state_publisher = self.create_publisher(String, 'safety/state', 10)
-        self.debug_publisher = self.create_publisher(String, 'safety/debug', 10)
 
         # fused LiDAR + camera scan, and the raw LiDAR scan as a fallback
         self.create_subscription(LaserScan, 'fused_scan', self.fused_scan_callback, 10)
@@ -311,7 +311,7 @@ class SafetyNode(Node):
 
     def odom_callback(self, msg: Odometry) -> None:
         """
-        Update the measured forward speed.
+        Store the measured forward speed and move the dead-reckoned pose on to this message.
 
         Args:
             msg (Odometry): Incoming odometry message.
@@ -330,7 +330,7 @@ class SafetyNode(Node):
         Returns:
             float: Odometry speed, or the last commanded speed if odometry is stale.
         """
-        if self.age_seconds(self.last_odom_time) <= self.ODOM_TIMEOUT:
+        if seconds_since(self, self.last_odom_time) <= self.ODOM_TIMEOUT:
             return self.current_speed
         return self.last_command_speed
 
@@ -359,8 +359,8 @@ class SafetyNode(Node):
             float: Seconds; the node clock's time if the stamp is 0 (unstamped) or more than
             1 s away from it (a different clock).
         """
-        now = self.get_clock().now().nanoseconds * 1e-9
-        t = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        now = now_seconds(self)
+        t = stamp_seconds(stamp)
         # unstamped, or from another clock: fall back to the node clock
         if t <= 0.0 or abs(t - now) > 1.0:
             return now
@@ -426,7 +426,7 @@ class SafetyNode(Node):
 
     def fused_scan_callback(self, msg: LaserScan) -> None:
         """
-        Store and check a fused scan.
+        Handle a scan from fusion_node: store it and brake at once if it is unsafe.
 
         Args:
             msg (LaserScan): Scan from fusion_node.
@@ -435,7 +435,7 @@ class SafetyNode(Node):
 
     def raw_scan_callback(self, msg: LaserScan) -> None:
         """
-        Store and check a raw LiDAR scan (used only while the fused scan is stale).
+        Handle a raw LiDAR scan, which is only checked while the fused scan is stale.
 
         Args:
             msg (LaserScan): Raw scan from the LiDAR.
@@ -457,10 +457,7 @@ class SafetyNode(Node):
             taken = self.msg_time(msg.header.stamp)        # when the scan was taken
 
             # invalid readings become inf; each beam also stored as an (x, y) point
-            ranges = np.array(msg.ranges, dtype=np.float64)
-            with np.errstate(invalid='ignore'):
-                bad = ~np.isfinite(ranges) | (ranges < msg.range_min) | (ranges > msg.range_max)
-            ranges[bad] = np.inf
+            ranges = clean_lidar(msg.ranges, msg.range_min, msg.range_max)
             angles = msg.angle_min + np.arange(ranges.size) * msg.angle_increment
             finite = np.isfinite(ranges)
             safe_r = np.where(finite, ranges, 0.0)
@@ -472,7 +469,7 @@ class SafetyNode(Node):
             source.angles = angles
             source.x = safe_r * np.cos(angles)
             source.y = safe_r * np.sin(angles)
-            if self.age_seconds(self.last_odom_time) > self.ODOM_TIMEOUT:
+            if seconds_since(self, self.last_odom_time) > self.ODOM_TIMEOUT:
                 self.advance_pose(self.measured_speed(), self.yaw_rate(), now_s)  # no odometry
             # the scan is matched with where the car was when it was taken, not on arrival
             source.tracker.add(taken, source.x[finite], source.y[finite], self.pose_at(taken))
@@ -523,9 +520,9 @@ class SafetyNode(Node):
             ScanSource | None: The scan, or None if both are stale.
         """
         fused, raw = self.sources['fused'], self.sources['raw']
-        if self.age_seconds(fused.time) <= self.SCAN_TIMEOUT:
+        if seconds_since(self, fused.time) <= self.SCAN_TIMEOUT:
             return fused
-        if self.age_seconds(raw.time) <= self.stale_timeout:
+        if seconds_since(self, raw.time) <= self.stale_timeout:
             return raw
         return None
 
@@ -561,7 +558,7 @@ class SafetyNode(Node):
 
         # TTC to the safety margin, and the TTC the car needs at this speed (variable). The
         # car has driven on since the scan was taken, so the gap is that much shorter
-        age = max(0.0, self.get_clock().now().nanoseconds * 1e-9 - source.capture)
+        age = max(0.0, now_seconds(self) - source.capture)
         gap = along - self.STOP_MARGIN - speed * age
         needed = np.broadcast_to(
             required_ttc(speed, extra, self.T_REACT, self.A_BRAKE, self.TTC_MARGIN), gap.shape)
@@ -672,12 +669,11 @@ class SafetyNode(Node):
 
         Args:
             msg (AckermannDriveStamped): Steering and speed request. A negative speed
-                requests a latched stop; zero leaves the speed at drive_speed; a positive
-                speed is used, never above drive_speed or the soft-stage cap.
+                requests a latched stop; zero leaves the speed at max_speed; a positive
+                speed is used, never above max_speed or the soft-stage cap.
         """
         try:
             self.handle_request(msg)
-            self.publish_debug(msg)
         except Exception as exc:
             self.fail_safe('drive request', exc)
 
@@ -706,12 +702,12 @@ class SafetyNode(Node):
         if source is None or not self.inputs_fresh():
             return
         if self.safety_mode == 'stale':
-            self.set_mode('normal')                     # inputs fresh again: resume
+            self.safety_mode = 'normal'                 # inputs fresh again: resume
 
-        # requested speed, never above drive_speed (0 means drive_speed)
-        speed = self.drive_speed
+        # requested speed, never above max_speed (0 means max_speed)
+        speed = self.max_speed
         if msg.drive.speed > 0.0:
-            speed = min(self.drive_speed, msg.drive.speed)
+            speed = min(self.max_speed, msg.drive.speed)
 
         # hard stage: AEB if the car cannot stop in time on the requested path
         hard, cap = self.check_path(source, self.latest_steering_angle,
@@ -723,25 +719,11 @@ class SafetyNode(Node):
         # soft stage: slow down so the car can still stop (after AEB too: it drives on)
         if cap < speed:
             speed = max(cap, 0.0)
-            self.set_mode('slow')
+            self.safety_mode = 'slow'
         elif self.safety_mode in ('slow', 'aeb'):
-            self.set_mode('normal')
+            self.safety_mode = 'normal'
 
         self.publish_drive_command(speed, self.latest_steering_angle)
-
-    def age_seconds(self, stamp: Time | None) -> float:
-        """
-        Return how long ago an input arrived.
-
-        Args:
-            stamp (Time | None): Arrival time of the input, or None if never.
-
-        Returns:
-            float: Age in seconds, or inf if the input never arrived.
-        """
-        if stamp is None:
-            return math.inf
-        return (self.get_clock().now() - stamp).nanoseconds * 1e-9
 
     def inputs_fresh(self) -> bool:
         """
@@ -750,7 +732,7 @@ class SafetyNode(Node):
         Returns:
             bool: True if both arrived within stale_timeout.
         """
-        return (self.age_seconds(self.last_request_time) <= self.stale_timeout
+        return (seconds_since(self, self.last_request_time) <= self.stale_timeout
                 and self.active_source() is not None)
 
     def watchdog_callback(self) -> None:
@@ -767,7 +749,7 @@ class SafetyNode(Node):
             return
 
         if self.safety_mode in ('normal', 'slow', 'aeb'):
-            self.set_mode('stale')
+            self.safety_mode = 'stale'
         self.emergency_brake()
 
     # Outputs
@@ -780,15 +762,6 @@ class SafetyNode(Node):
             bool: True once the lap counter's stop request has latched the stop.
         """
         return self.safety_mode == 'stopped'
-
-    def set_mode(self, mode: str) -> None:
-        """
-        Change the safety mode (published on /safety/state, not logged).
-
-        Args:
-            mode (str): New mode: normal, slow or stale (engage_aeb() sets aeb, latch() stopped).
-        """
-        self.safety_mode = mode
 
     def latch(self, reason: str) -> None:
         """
@@ -835,7 +808,13 @@ class SafetyNode(Node):
         self.emergency_brake()
 
     def publish_state(self) -> None:
-        """Publish the safety mode and the last check on /safety/state, for debugging."""
+        """
+        Publish the safety mode and the numbers behind it on /safety/state.
+
+        The line shows the mode, the TTC of the most urgent point on the path, the AEB and
+        slow-down thresholds, the nearest path distance, the soft speed cap, the obstacle
+        speed, how late the scan arrived and which scan is in use.
+        """
         nearest, cap, ttc, needed, obstacle = self.last_check
         source = self.active_source()
         self.state_publisher.publish(String(data=(
@@ -843,34 +822,6 @@ class SafetyNode(Node):
             f'slow<{needed * self.SLOW_FACTOR:.2f}s path={nearest:.2f}m cap={cap:.2f}m/s '
             f'obs={obstacle:.1f}m/s lag={1000.0 * source.lag if source else 0.0:.0f}ms '
             f'scan={source.name if source else "none"}')))
-
-    def publish_debug(self, msg: AckermannDriveStamped) -> None:
-        """
-        Publish what was done with a drive request, as one line of JSON.
-
-        Nothing is built or sent unless something is subscribed to safety/debug.
-
-        Fields: t (node clock, s), mode (normal, slow, stale, aeb or stopped), requested
-        (speed asked for, m/s; negative = latched stop request), commanded (last speed sent
-        to /drive, m/s), v (measured speed, m/s), steer (rad), path (nearest point on the
-        path, m), cap (soft-stage speed cap, m/s), ttc and ttc_needed (most urgent point and
-        the AEB threshold there, s), obstacle (its own speed towards us, m/s), scan ('fused',
-        'raw' or 'none'), lag (how late that scan arrived, s). null means none (nothing on
-        the path).
-
-        Args:
-            msg (AckermannDriveStamped): The request that was just handled.
-        """
-        if self.debug_publisher.get_subscription_count() == 0:
-            return
-        nearest, cap, ttc, needed, obstacle = self.last_check
-        source = self.active_source()
-        self.debug_publisher.publish(String(data=encode(
-            t=self.get_clock().now().nanoseconds * 1e-9, mode=self.safety_mode,
-            requested=msg.drive.speed, commanded=self.last_command_speed,
-            v=self.current_speed, steer=self.latest_steering_angle,
-            path=nearest, cap=cap, ttc=ttc, ttc_needed=needed, obstacle=obstacle,
-            scan=source.name if source else 'none', lag=source.lag if source else None)))
 
     def publish_drive_command(self, speed: float, steering_angle: float) -> None:
         """

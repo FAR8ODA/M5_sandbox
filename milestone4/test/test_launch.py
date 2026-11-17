@@ -33,7 +33,7 @@ class LaunchConfiguration:
         return context.launch_configurations[self.name]
 
 
-def load_launch_module():
+def load_launch_module() -> types.ModuleType:
     """Import the launch file with launch and launch_ros replaced by stand-ins."""
     # fake modules exposing only the names the launch file imports
     stubs = {}
@@ -82,22 +82,23 @@ class TestLaunchParameters(unittest.TestCase):
                 found[action.kwargs['name']] = parameters[0]
         return found
 
-    def test_max_speed_sets_the_safety_cap_too(self):
+    def test_max_speed_sets_the_safety_cap_too(self) -> None:
         """Check max_speed sets the planner's speed and the safety cap."""
         nodes = self.nodes(max_speed='1.4')
         self.assertEqual(nodes['gap_follow_node']['max_speed'], 1.4)
-        self.assertEqual(nodes['safety_node']['drive_speed'], 1.4)
+        self.assertEqual(nodes['safety_node']['max_speed'], 1.4)
 
-    def test_file_values_without_arguments(self):
+    def test_file_values_without_arguments(self) -> None:
         """Check the YAML values (own and shared sections) apply with no arguments."""
         nodes = self.nodes()
-        self.assertEqual(nodes['gap_follow_node']['max_speed'], 1.0)
-        self.assertEqual(nodes['safety_node']['drive_speed'], 1.0)
+        self.assertEqual(nodes['gap_follow_node']['max_speed'], 1.5)
+        self.assertEqual(nodes['safety_node']['max_speed'], 1.5)
+        self.assertEqual(nodes['gap_follow_node']['pass_speed'], 1.2)   # own section
         for node in ('gap_follow_node', 'safety_node'):
             self.assertEqual(nodes[node]['a_brake'], 2.0)      # the shared /** section
             self.assertEqual(nodes[node]['wheelbase'], 0.33)
 
-    def test_arguments_in_any_section_win(self):
+    def test_arguments_in_any_section_win(self) -> None:
         """Check command-line arguments override shared and own YAML sections."""
         nodes = self.nodes(a_brake='2.5', num_laps='2', pass_speed='0.6', cam_x='0.05',
                            track_obstacles='true')
@@ -108,7 +109,7 @@ class TestLaunchParameters(unittest.TestCase):
         self.assertEqual(nodes['fusion_node']['cam_x'], 0.05)
         self.assertIs(nodes['safety_node']['track_obstacles'], True)
 
-    def test_sensor_switches(self):
+    def test_sensor_switches(self) -> None:
         """Check use_camera:=false drops the camera node and reaches the others."""
         nodes = self.nodes(use_camera='false')
         self.assertNotIn('camera_scan_node', nodes)

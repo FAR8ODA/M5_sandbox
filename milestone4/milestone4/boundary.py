@@ -2,8 +2,8 @@
 Colour mask -> LaserScan-style ranges (no ROS code).
 
 The lowest masked pixel in each image column is where the nearest object meets the
-floor: its row gives the distance and its column the bearing. Use mask_scan() for any
-mask, or colour_scan() to mask and scan a BGR image in one call.
+floor: its row gives the distance and its column the bearing. mask_scan() does this for
+one mask.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from milestone4.camera_model import CameraModel, ground_points
-from milestone4.masks import MaskParams, obstacle_mask
 import numpy as np
 
 
@@ -61,7 +60,7 @@ def mask_scan(mask: np.ndarray, cam: CameraModel, num_beams: int, range_max: flo
         contact_rows (int): Rows under the lowest pixel checked against not_below.
 
     Returns:
-        ScanResult: Ranges, scan geometry and the mask/boundary for debugging.
+        ScanResult: Ranges, scan geometry, the boundary row of each column and the mask.
     """
     angle_min, angle_max = cam.bearing_limits()
     num_beams = max(2, int(num_beams))                            # need at least 2 beams
@@ -86,27 +85,6 @@ def mask_scan(mask: np.ndarray, cam: CameraModel, num_beams: int, range_max: flo
 
     return ScanResult(ranges=ranges, angle_min=angle_min, angle_increment=angle_increment,
                       boundary_rows=hit_rows, mask=mask)
-
-
-def colour_scan(bgr: np.ndarray, cam: CameraModel, mask_params: MaskParams,
-                num_beams: int, range_max: float,
-                ignore_bottom_rows: int = 0) -> ScanResult:
-    """
-    Turn one camera image into a LiDAR-style scan of walls and boxes (Milestone 3 behaviour).
-
-    Args:
-        bgr (np.ndarray): Colour image from the camera (BGR).
-        cam (CameraModel): Camera settings.
-        mask_params (MaskParams): Colour thresholds for walls and boxes.
-        num_beams (int): Number of directions in the scan.
-        range_max (float): Distance reported when nothing is detected (m).
-        ignore_bottom_rows (int): Rows at the bottom to skip (the car body).
-
-    Returns:
-        ScanResult: Ranges, scan geometry and the mask/boundary for debugging.
-    """
-    return mask_scan(obstacle_mask(bgr, mask_params), cam, num_beams, range_max,
-                     ignore_bottom_rows)
 
 
 def _standing_on(hit_rows: np.ndarray, below: np.ndarray, contact_rows: int,

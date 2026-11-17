@@ -18,41 +18,6 @@ import math
 import numpy as np
 
 
-def stopping_distance(speed: float, t_react: float, a_brake: float, margin: float) -> float:
-    """
-    Return the distance needed to stop from a speed.
-
-    Args:
-        speed (float): Current speed (m/s).
-        t_react (float): Time before the brakes act (s).
-        a_brake (float): Braking deceleration (m/s^2).
-        margin (float): Gap to leave in front of the obstacle (m).
-
-    Returns:
-        float: Reaction distance + braking distance + margin (m).
-    """
-    return speed * t_react + speed * speed / (2.0 * a_brake) + margin
-
-
-def safe_speed(distance: float, t_react: float, a_brake: float) -> float:
-    """
-    Return the highest speed that can still stop within a distance.
-
-    Solves v * t_react + v^2 / (2 a_brake) = distance for v.
-
-    Args:
-        distance (float): Distance available for reacting and braking (m).
-        t_react (float): Time before the brakes act (s).
-        a_brake (float): Braking deceleration (m/s^2).
-
-    Returns:
-        float: Speed (m/s), 0 if the distance is not positive.
-    """
-    if distance <= 0.0:
-        return 0.0
-    return a_brake * (-t_react + math.sqrt(t_react * t_react + 2.0 * distance / a_brake))
-
-
 def required_ttc(speed, obstacle_speed, t_react: float, a_brake: float,
                  ttc_margin: float) -> np.ndarray:
     """
@@ -84,9 +49,9 @@ def slow_speed_cap(gap, obstacle_speed, factor: float, t_react: float, a_brake: 
     Return the highest speed that keeps ttc at least factor times the required TTC.
 
     For a static obstacle, ttc = gap / v >= factor * (t_react + ttc_margin + v / (2 a_brake))
-    means gap / factor >= v (t_react + ttc_margin) + v^2 / (2 a_brake): the safe_speed()
-    equation with a reaction time of t_react + ttc_margin. An obstacle coming towards us
-    takes its own speed off the cap, so the closing speed stays the same.
+    means gap / factor >= v (t_react + ttc_margin) + v^2 / (2 a_brake), a quadratic in v
+    that is solved for its positive root. An obstacle coming towards us takes its own
+    speed off the cap, so the closing speed stays the same.
 
     Args:
         gap: Distance to the safety margin along the path (m), a number or an array.
@@ -99,8 +64,8 @@ def slow_speed_cap(gap, obstacle_speed, factor: float, t_react: float, a_brake: 
     Returns:
         np.ndarray: Speed cap (m/s, >= 0).
     """
-    # solve safe_speed() on gap / factor, with the TTC margin added to the reaction time
-    g = np.maximum(np.asarray(gap, dtype=np.float64), 0.0) / max(factor, 1e-6)
+    # positive root of v t + v^2 / (2 a_brake) = gap / factor, with t = t_react + ttc_margin
+    g =np.maximum(np.asarray(gap, dtype=np.float64), 0.0) / max(factor, 1e-6)
     t = t_react + ttc_margin
     v = a_brake * (-t + np.sqrt(t * t + 2.0 * g / a_brake))
     return np.maximum(v - np.maximum(np.asarray(obstacle_speed, dtype=np.float64), 0.0), 0.0)

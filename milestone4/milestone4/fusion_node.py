@@ -13,27 +13,14 @@ from milestone4.camera_model import CameraModel
 from milestone4.fusion import (box_labels, camera_to_lidar, CameraPoints, clean_lidar,
                                column_counts, FusionParams, points_to_beams, scan_to_points,
                                ScanFuser)
+from milestone4.node_utils import run_node, seconds_since, stamp_seconds
 from nav_msgs.msg import Odometry
 import numpy as np
-import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
 from std_msgs.msg import String
-
-
-def stamp_seconds(stamp) -> float:
-    """
-    Convert a message header stamp to seconds.
-
-    Args:
-        stamp: builtin_interfaces/Time with sec and nanosec fields.
-
-    Returns:
-        float: The stamp in seconds.
-    """
-    return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
 
 class FusionNode(Node):
@@ -185,13 +172,11 @@ class FusionNode(Node):
         Returns:
             bool: True if it arrived within camera_timeout.
         """
-        if arrival is None:
-            return False
-        return (self.get_clock().now() - arrival).nanoseconds * 1e-9 <= self.CAMERA_TIMEOUT
+        return seconds_since(self, arrival) <= self.CAMERA_TIMEOUT
 
     def shift_since(self, camera_stamp: float, lidar: LaserScan) -> float:
         """
-        Distance the car drove between a camera frame and a LiDAR scan.
+        Estimate how far the car drove between a camera frame and a LiDAR scan.
 
         Args:
             camera_stamp (float): When the camera frame was taken (s).
@@ -323,22 +308,9 @@ class FusionNode(Node):
             self.fused_publisher.publish(msg)
 
 
-def main(args=None) -> None:
-    """
-    Run the fusion node until interrupted (console entry point).
-
-    Args:
-        args: Command-line arguments passed to rclpy.init (None = sys.argv).
-    """
-    rclpy.init(args=args)
-    node = FusionNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    node.destroy_node()
-    if rclpy.ok():
-        rclpy.shutdown()
+def main() -> None:
+    """Run the fusion node until Ctrl+C (console entry point)."""
+    run_node(FusionNode)
 
 
 if __name__ == '__main__':

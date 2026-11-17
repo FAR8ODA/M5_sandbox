@@ -13,7 +13,7 @@ on every scan, then animates it:
 
 Setup (once):   pip install matplotlib numpy
 Examples (run from milestone4/test):
-    python sim_viewer.py                                # current code, ideal car, 1.0 m/s
+    python sim_viewer.py                                # current code, ideal car, 1.5 m/s
     python sim_viewer.py --realistic --speed 1.5        # car with steering lag/error, LiDAR offset
     python sim_viewer.py --realistic --deep 0.7         # aim further from the inner wall
     python sim_viewer.py --boxes --realistic --speed 1.5
@@ -22,6 +22,8 @@ Examples (run from milestone4/test):
 The nodes' log messages print in the terminal as the sim runs (--quiet to hide them).
 Keys: space = pause/resume, left/right = step when paused, up/down = playback speed.
 """
+
+from __future__ import annotations
 
 import argparse
 import math
@@ -35,7 +37,7 @@ USED = {}                        # planner values actually used, for the title
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def simulate(args):
+def simulate(args) -> tuple[np.ndarray, dict, dict, float]:
     """
     Run the closed-loop sim with the planner instrumented for drawing.
 
@@ -63,7 +65,7 @@ def simulate(args):
     class RecordingPlanner(base):
         """The real planner, with its intermediate results recorded for drawing."""
 
-        def __init__(self):
+        def __init__(self) -> None:
             """Build the real planner, applying --deep and noting the values used."""
             super().__init__()
             if args.deep is not None:
@@ -71,29 +73,29 @@ def simulate(args):
             USED['deep'] = self.DEEP_FRACTION
             USED['margin'] = self.MARGIN
 
-        def drive_on(self, msg, source):
+        def drive_on(self, msg) -> None:
             """Start a record for this scan, run the real planner, then store the record."""
             self._rec = {'scan': np.asarray(msg.ranges, float),
                          'amin': msg.angle_min, 'inc': msg.angle_increment}
-            super().drive_on(msg, source)
+            super().drive_on(msg)
             records[int(round(cl.ros_stubs.CLOCK.seconds * 1000))] = self._rec
 
-        def extend_disparities(self, ranges, boxes, inc):
+        def extend_disparities(self, ranges, boxes, inc) -> np.ndarray:
             """Run the real disparity extender and record its input and output."""
             out = super().extend_disparities(ranges, boxes, inc)
             self._rec['clean'], self._rec['ext'] = ranges.copy(), out.copy()
             return out
 
-        def find_target(self, extended, angles):
+        def find_target(self, extended, angles) -> int | None:
             """Run the real target search and record the chosen beam (angle, range)."""
             i = super().find_target(extended, angles)
             if i is not None:
                 self._rec['target'] = (float(angles[i]), float(extended[i]))
             return i
 
-        def corner_check(self, ranges, angles, steering):
+        def corner_check(self, steering, beside) -> float:
             """Run the real corner check and record the final steering angle."""
-            out = super().corner_check(ranges, angles, steering)
+            out = super().corner_check(steering, beside)
             self._rec['steer'] = out
             return out
 
@@ -130,7 +132,7 @@ def simulate(args):
     return world, result, records, offset
 
 
-def print_node_logs(stubs):
+def print_node_logs(stubs) -> None:
     """
     Print every node's log messages as they happen, like ROS does in the terminal.
 
@@ -141,12 +143,12 @@ def print_node_logs(stubs):
     class PrintingRecords(list):
         """A node's log record list that also prints each non-debug message."""
 
-        def __init__(self, name):
+        def __init__(self, name) -> None:
             """Create an empty list for the node called name."""
             super().__init__()
             self.name = name
 
-        def append(self, record):
+        def append(self, record) -> None:
             """Print a (level, message) record with the sim time, then store it."""
             level, message = record
             if level != 'debug':
@@ -156,7 +158,7 @@ def print_node_logs(stubs):
 
     init = stubs.Node.__init__
 
-    def node_init(self, node_name, **kwargs):
+    def node_init(self, node_name, **kwargs) -> None:
         """Run the stub Node constructor, then give the node a printing record list."""
         init(self, node_name, **kwargs)
         self._logger.records = PrintingRecords(node_name)
@@ -164,7 +166,7 @@ def print_node_logs(stubs):
     stubs.Node.__init__ = node_init
 
 
-def many_box_centres(straight, radius, lane):
+def many_box_centres(straight, radius, lane) -> list[tuple[float, float]]:
     """
     Centres of 5 boxes (0.4 m) on the two straights (none on the turns), alternating sides.
 
@@ -185,7 +187,7 @@ def many_box_centres(straight, radius, lane):
     ]
 
 
-def side_gaps(world, x, y, yaw):
+def side_gaps(world, x, y, yaw) -> tuple[float, float]:
     """Distance from the car's centre line to the nearest wall on its left and right (m)."""
     dx, dy = world[:, 0] - x, world[:, 1] - y
     ahead = dx * math.cos(yaw) + dy * math.sin(yaw)
@@ -195,13 +197,13 @@ def side_gaps(world, x, y, yaw):
     return (lefts.min() if lefts.size else math.inf), (rights.min() if rights.size else math.inf)
 
 
-def main():
+def main() -> None:
     """Parse the options, run the sim, print a summary, then animate it (unless --check)."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--code', default=TEST_DIR,
                    help='milestone4/test folder to run (default: the folder of this script)')
-    p.add_argument('--speed', type=float, default=1.0, help='max_speed (m/s)')
+    p.add_argument('--speed', type=float, default=1.5, help='max_speed (m/s)')
     p.add_argument('--realistic', action='store_true',
                    help='steering lag/delay, steering 0.8x command, LiDAR 0.27 m ahead, noise')
     p.add_argument('--deep', type=float, default=None,
@@ -277,7 +279,7 @@ def main():
 
     state = {'k': 0, 'paused': False, 'skip': 2}
 
-    def draw(k):
+    def draw(k) -> tuple:
         """Draw trace step k (car, trail, scan, extended beams, target, info panel)."""
         t, x, y, v, mode, laps = trace[k]
         yaw = yaws[k]
@@ -315,13 +317,13 @@ def main():
                       f"mode    {mode}\nlaps    {laps}")
         return car, trail, scan_pts, ext_pts, target_ln, lidar_dot, info
 
-    def update(_):
+    def update(_) -> tuple:
         """Advance playback by the current skip (unless paused) and redraw."""
         if not state['paused']:
             state['k'] = min(state['k'] + state['skip'], len(trace) - 1)
         return draw(state['k'])
 
-    def on_key(event):
+    def on_key(event) -> None:
         """Handle the playback keys: pause, step and speed."""
         if event.key == ' ':
             state['paused'] = not state['paused']

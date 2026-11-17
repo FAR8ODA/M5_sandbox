@@ -107,10 +107,11 @@ class TestParamsFile(unittest.TestCase):
                        - launch_set)
             self.assertFalse(missing, f'{node} parameters missing: {sorted(missing)}')
 
-    def test_speed_caps_match(self) -> None:
-        """The planner's top speed and the safety node's cap are the same."""
-        self.assertEqual(self.section('gap_follow_node')['max_speed'],
-                         self.section('safety_node')['drive_speed'])
+    def test_one_top_speed(self) -> None:
+        """The planner's top speed and the safety node's cap are one shared value."""
+        self.assertIn('max_speed', self.section('/**'))
+        self.assertIn('max_speed', self.declared['gap_follow_node'])
+        self.assertIn('max_speed', self.declared['safety_node'])
 
 
 if __name__ == '__main__':

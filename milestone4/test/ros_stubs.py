@@ -8,9 +8,12 @@ request, odometry and simulated-world helpers.
 """
 
 import importlib.util
+import math
 from pathlib import Path
 import sys
 import types
+
+import numpy as np
 
 # the package source (milestone4/milestone4) must be importable
 # as ``milestone4``
@@ -389,11 +392,11 @@ class Int32(_Data):
 class CvBridge:
     """cv_bridge.CvBridge; tests call the node logic directly instead."""
 
-    def imgmsg_to_cv2(self, msg, desired_encoding: str = 'passthrough'):
+    def imgmsg_to_cv2(self, msg, desired_encoding: str = 'passthrough') -> np.ndarray:
         """Raise NotImplementedError: tests pass NumPy images directly."""
         raise NotImplementedError('tests pass NumPy images directly')
 
-    def cv2_to_imgmsg(self, img, encoding: str = 'passthrough'):
+    def cv2_to_imgmsg(self, img, encoding: str = 'passthrough') -> Image:
         """Raise NotImplementedError: tests pass NumPy images directly."""
         raise NotImplementedError('tests pass NumPy images directly')
 
@@ -453,9 +456,8 @@ WALL_STEP = 0.005               # spacing of simulated wall points (m)
 WALL_POINT_RADIUS = 0.004       # each point is a disc this big; > WALL_STEP / 2 = solid wall
 
 
-def lidar_angles():
+def lidar_angles() -> np.ndarray:
     """Return the bearing of every simulated LiDAR beam (rad)."""
-    import numpy as np
     return LIDAR_ANGLE_MIN + np.arange(LIDAR_BEAMS) * LIDAR_INCREMENT
 
 
@@ -503,7 +505,7 @@ def make_odom(speed: float, yaw_rate: float = 0.0) -> Odometry:
     return msg
 
 
-def world_scan(world, x: float, y: float, yaw: float):
+def world_scan(world, x: float, y: float, yaw: float) -> np.ndarray:
     """
     Return simulated LiDAR ranges of world points (Nx2, m) seen from a car pose.
 
@@ -514,8 +516,6 @@ def world_scan(world, x: float, y: float, yaw: float):
     the points: those beams saw through the wall, e.g. a box 4 m away behind the inner
     wall 0.66 m away.)
     """
-    import math
-    import numpy as np
     # world points into the car frame
     d = np.asarray(world, dtype=float) - [x, y]
     c, s = math.cos(-yaw), math.sin(-yaw)
@@ -540,35 +540,32 @@ def world_scan(world, x: float, y: float, yaw: float):
     return out
 
 
-def wall_points(x0: float, y0: float, x1: float, y1: float, step: float = WALL_STEP):
+def wall_points(x0: float, y0: float, x1: float, y1: float, step: float = WALL_STEP) -> np.ndarray:
     """Return dense points (Nx2) along a straight wall from (x0, y0) to (x1, y1)."""
-    import numpy as np
     # at least 2 points, about step apart
     n = max(2, int(np.hypot(x1 - x0, y1 - y0) / step))
     t = np.linspace(0.0, 1.0, n)
     return np.stack([x0 + t * (x1 - x0), y0 + t * (y1 - y0)], axis=1)
 
 
-def corridor_ranges(half_width: float = 0.6, far: float = 10.0):
+def corridor_ranges(half_width: float = 0.6, far: float = 10.0) -> np.ndarray:
     """
     Return LiDAR ranges for a straight corridor with walls at y = +/- half_width.
 
     Beams that never hit a wall (straight down the corridor) read ``far``.
     """
-    import numpy as np
     a = lidar_angles()
     with np.errstate(divide='ignore'):
         r = np.where(np.abs(np.sin(a)) > 1e-6, half_width / np.abs(np.sin(a)), np.inf)
     return np.minimum(r, far)
 
 
-def add_box(ranges, x: float, y_min: float, y_max: float):
+def add_box(ranges, x: float, y_min: float, y_max: float) -> np.ndarray:
     """
     Put a flat box face at distance x ahead, from y_min to y_max (left positive).
 
     Each beam that crosses the face is shortened to it.
     """
-    import numpy as np
     a = lidar_angles()
     out = np.array(ranges, dtype=float)
     # where each beam crosses the line x = const

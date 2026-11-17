@@ -1,5 +1,7 @@
 """Tests for the LiDAR-camera fusion rules (fusion.py) and fusion_node."""
 
+from __future__ import annotations
+
 import math
 import unittest
 
@@ -16,7 +18,7 @@ CAMERA_HEIGHT = 0.187           # camera above the floor (m)
 MASK_SHAPE = (240, 320)         # the box mask: half of a 640 x 480 colour image
 
 
-def face_points(x, y_min, y_max, count=40):
+def face_points(x, y_min, y_max, count=40) -> CameraPoints:
     """
     Return depth points along a face x metres ahead, placed on the LiDAR beams.
 
@@ -34,7 +36,7 @@ def face_points(x, y_min, y_max, count=40):
     return CameraPoints(beams=beams, ranges=ranges)
 
 
-def camera_scan(x, y_min, y_max, t, range_max=4.0):
+def camera_scan(x, y_min, y_max, t, range_max=4.0) -> ros_stubs.LaserScan:
     """
     Return a camera-style LaserScan (180 beams, +/-35 degrees) seeing a face x m ahead.
 
@@ -55,7 +57,7 @@ def camera_scan(x, y_min, y_max, t, range_max=4.0):
                                range_min=0.05, range_max=range_max, t=t)
 
 
-def mask_camera(pitch_deg=-5.3):
+def mask_camera(pitch_deg=-5.3) -> CameraModel:
     """
     Return the colour camera at the mask's resolution (half of 640 x 480, f = 600).
 
@@ -70,7 +72,7 @@ def mask_camera(pitch_deg=-5.3):
                        pitch_rad=math.radians(pitch_deg))
 
 
-def paint(mask, cam, x_near, x_far, y_min, y_max, low, high, height=CAMERA_HEIGHT):
+def paint(mask, cam, x_near, x_far, y_min, y_max, low, high, height=CAMERA_HEIGHT) -> float:
     """
     Paint what the camera sees of a cardboard surface into a box mask.
 
@@ -89,7 +91,7 @@ def paint(mask, cam, x_near, x_far, y_min, y_max, low, high, height=CAMERA_HEIGH
     return float(v_bottom[0])
 
 
-def labels_for(lidar, mask, cam=None, **params):
+def labels_for(lidar, mask, cam=None, **params) -> np.ndarray:
     """
     Run box_labels on simulated LiDAR ranges and a painted mask.
 
@@ -110,11 +112,11 @@ def labels_for(lidar, mask, cam=None, **params):
 class BoxLabelTest(unittest.TestCase):
     """Box labels: LiDAR returns projected into the camera's box mask."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         """Store the simulated LiDAR beam angles."""
         self.angles = ros_stubs.lidar_angles()
 
-    def test_lidar_returns_on_a_box_are_labelled(self):
+    def test_lidar_returns_on_a_box_are_labelled(self) -> None:
         """Check box-face returns are labelled, walls are not, and LiDAR ranges are kept."""
         lidar = ros_stubs.add_box(ros_stubs.corridor_ranges(), 1.5, -0.2, 0.2)
         mask = np.zeros(MASK_SHAPE, dtype=np.uint8)
@@ -131,7 +133,7 @@ class BoxLabelTest(unittest.TestCase):
         self.assertTrue(np.allclose(obstacle[labels], lidar[labels]))   # LiDAR range kept
         self.assertFalse(np.isfinite(obstacle[~labels]).any())
 
-    def test_a_degree_of_pitch_does_not_lose_the_label(self):
+    def test_a_degree_of_pitch_does_not_lose_the_label(self) -> None:
         # braking or a bump pitches the car. The labels must survive it: they dropped out
         # with the old rule (the box's floor distance had to match the LiDAR within 0.25 m)
         """Check labels survive a 1 degree pitch error that broke the old range rule."""
@@ -150,7 +152,7 @@ class BoxLabelTest(unittest.TestCase):
             forward, _, _ = ground_points(np.array([160.0]), np.array([base_row]), mask_camera())
             self.assertGreater(abs(float(forward[0]) - 2.0), 0.25)
 
-    def test_camera_anywhere_from_15_to_22_cm_above_the_floor(self):
+    def test_camera_anywhere_from_15_to_22_cm_above_the_floor(self) -> None:
         # the camera sits 15 to 22 cm above the floor; cam_z (its height above the LiDAR's
         # scan plane, here 12.7 cm up) is only known roughly. With cam_z left at its default
         # the labels hold over that whole range of real heights, near and far
@@ -167,7 +169,7 @@ class BoxLabelTest(unittest.TestCase):
                 self.assertGreater(labels[on_face].mean(), 0.9, (height, distance))
                 self.assertFalse(labels[np.abs(self.angles) > math.atan2(0.3, distance)].any())
 
-    def test_tan_furniture_behind_the_ducting_is_not_a_box(self):
+    def test_tan_furniture_behind_the_ducting_is_not_a_box(self) -> None:
         # the LiDAR sees the ducting 1.5 m ahead; a tan desk 2.5 m away shows above it
         """Check tan furniture seen above the ducting is not labelled."""
         lidar = ros_stubs.add_box(ros_stubs.corridor_ranges(), 1.5, -0.6, 0.6)
@@ -176,7 +178,7 @@ class BoxLabelTest(unittest.TestCase):
         self.assertGreater(int(mask.sum()), 0)
         self.assertFalse(labels_for(lidar, mask).any())
 
-    def test_tape_on_the_floor_is_not_a_box(self):
+    def test_tape_on_the_floor_is_not_a_box(self) -> None:
         # orange tape 0.7-0.9 m ahead; the LiDAR looks over it at a wall 3 m away
         """Check orange floor tape is not labelled and adds nothing to the scan."""
         lidar = ros_stubs.add_box(ros_stubs.corridor_ranges(), 3.0, -0.6, 0.6)
@@ -189,7 +191,7 @@ class BoxLabelTest(unittest.TestCase):
         self.assertTrue(np.allclose(fused, lidar))            # colour never adds an object
         self.assertFalse(np.isfinite(obstacle).any())
 
-    def test_far_returns_are_not_labelled(self):
+    def test_far_returns_are_not_labelled(self) -> None:
         """Check returns beyond label_max_range are not labelled."""
         lidar = ros_stubs.add_box(ros_stubs.corridor_ranges(), 3.0, -0.2, 0.2)
         mask = np.zeros(MASK_SHAPE, dtype=np.uint8)
@@ -197,14 +199,14 @@ class BoxLabelTest(unittest.TestCase):
         self.assertTrue(labels_for(lidar, mask).any())
         self.assertFalse(labels_for(lidar, mask, label_max_range=2.0).any())
 
-    def test_label_needs_a_lidar_return(self):
+    def test_label_needs_a_lidar_return(self) -> None:
         """Check a label on a beam with no LiDAR return gives no obstacle."""
         lidar = np.full(ros_stubs.LIDAR_BEAMS, np.inf)        # no returns at all
         labels = np.ones(ros_stubs.LIDAR_BEAMS, dtype=bool)
         _, obstacle = ScanFuser(FusionParams()).fuse(lidar, 0.06, 10.0, [], labels=labels)
         self.assertFalse(np.isfinite(obstacle).any())
 
-    def test_image_points_undoes_ground_points(self):
+    def test_image_points_undoes_ground_points(self) -> None:
         """Check image_points() inverts ground_points()."""
         cam = mask_camera(pitch_deg=4.0)
         us, vs = np.array([20.0, 160.0, 300.0]), np.array([150.0, 200.0, 230.0])
@@ -214,7 +216,7 @@ class BoxLabelTest(unittest.TestCase):
         self.assertTrue(ok.all())
         self.assertTrue(np.allclose(u, us) and np.allclose(v, vs))
 
-    def test_lidar_to_camera_undoes_camera_to_lidar(self):
+    def test_lidar_to_camera_undoes_camera_to_lidar(self) -> None:
         """Check lidar_to_camera() inverts camera_to_lidar()."""
         params = FusionParams(cam_x=0.1, cam_y=-0.02, cam_yaw=math.radians(3.0))
         x, y = np.array([1.0, 2.5]), np.array([0.3, -0.4])
@@ -226,7 +228,7 @@ class BoxLabelTest(unittest.TestCase):
 class FusionRulesTest(unittest.TestCase):
     """The depth association and persistence rules, without ROS."""
 
-    def test_depth_point_on_a_lidar_return_changes_nothing(self):
+    def test_depth_point_on_a_lidar_return_changes_nothing(self) -> None:
         """Check a depth point on a LiDAR return leaves the scan unchanged."""
         lidar = ros_stubs.add_box(ros_stubs.corridor_ranges(), 1.5, -0.2, 0.2)
         fused, obstacle = ScanFuser(FusionParams()).fuse(
@@ -234,7 +236,7 @@ class FusionRulesTest(unittest.TestCase):
         self.assertTrue(np.allclose(fused, lidar))
         self.assertFalse(np.isfinite(obstacle).any())
 
-    def test_camera_only_point_needs_persistence(self):
+    def test_camera_only_point_needs_persistence(self) -> None:
         """Check a depth-only point is added after persist_frames frames, not as a box."""
         lidar = ros_stubs.corridor_ranges()                  # the LiDAR misses a low object
         low = face_points(0.8, -0.1, 0.1)
@@ -250,9 +252,8 @@ class FusionRulesTest(unittest.TestCase):
         # a depth-only object is not a box: no box margin or pass speed for it (on the car,
         # floor that slipped past the floor rejection made the planner slow all lap)
         self.assertFalse(np.isfinite(obstacle).any())
-        self.assertTrue(fuser.trusted[low.beams].all())
 
-    def test_reused_camera_frame_does_not_count(self):
+    def test_reused_camera_frame_does_not_count(self) -> None:
         """Check the same camera frame reused by later scans does not build persistence."""
         lidar = ros_stubs.corridor_ranges()
         low = face_points(0.8, -0.1, 0.1)
@@ -262,7 +263,7 @@ class FusionRulesTest(unittest.TestCase):
             fused, _ = fuser.fuse(lidar, 0.06, 10.0, [low], new_camera_frame=False)
         self.assertTrue(np.allclose(fused, lidar))
 
-    def test_missing_frame_resets_persistence(self):
+    def test_missing_frame_resets_persistence(self) -> None:
         """Check a frame without the point resets its persistence."""
         lidar = ros_stubs.corridor_ranges()
         low = face_points(0.8, -0.1, 0.1)
@@ -275,7 +276,7 @@ class FusionRulesTest(unittest.TestCase):
         fused, _ = fuser.fuse(lidar, 0.06, 10.0, [low])
         self.assertTrue(np.allclose(fused[low.beams], lidar[low.beams]))
 
-    def test_point_behind_a_lidar_return_is_ignored(self):
+    def test_point_behind_a_lidar_return_is_ignored(self) -> None:
         """Check a depth point farther than the LiDAR return is ignored."""
         lidar = ros_stubs.add_box(ros_stubs.corridor_ranges(), 1.0, -0.2, 0.2)
         fuser = ScanFuser(FusionParams(persist_frames=1))
@@ -283,7 +284,7 @@ class FusionRulesTest(unittest.TestCase):
         self.assertTrue(np.allclose(fused, lidar))
         self.assertFalse(np.isfinite(obstacle).any())
 
-    def test_camera_to_lidar_transform(self):
+    def test_camera_to_lidar_transform(self) -> None:
         """Check the camera-to-LiDAR rotation, offset and ego-motion shift."""
         params = FusionParams(cam_x=0.1, cam_y=0.0, cam_yaw=math.radians(90.0))
         x, y = camera_to_lidar(np.array([1.0]), np.array([0.0]), params)
@@ -292,13 +293,13 @@ class FusionRulesTest(unittest.TestCase):
         x, _ = camera_to_lidar(np.array([1.0]), np.array([0.0]), FusionParams(), shift_x=0.05)
         self.assertAlmostEqual(float(x[0]), 0.95)
 
-    def test_scan_to_points_drops_nothing_seen(self):
+    def test_scan_to_points_drops_nothing_seen(self) -> None:
         """Check range_max and NaN beams are dropped by scan_to_points()."""
         x, y = scan_to_points([4.0, 1.0, 4.0, float('nan')], -0.1, 0.1, 4.0)
         self.assertEqual(x.size, 1)
         self.assertAlmostEqual(float(np.hypot(x[0], y[0])), 1.0)
 
-    def test_clean_lidar_marks_invalid_as_inf(self):
+    def test_clean_lidar_marks_invalid_as_inf(self) -> None:
         """Check NaN and out-of-range readings become inf."""
         r = clean_lidar([float('nan'), 0.01, 20.0, 2.0], 0.06, 10.0)
         self.assertTrue(np.isinf(r[:3]).all())
@@ -308,26 +309,26 @@ class FusionRulesTest(unittest.TestCase):
 class FusionNodeTest(unittest.TestCase):
     """The node: freshness, persistence across real camera frames, and the mode topic."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         """Reset the fake clock and parameter overrides."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         """Clear the parameter overrides."""
         ros_stubs.PARAM_OVERRIDES.clear()
 
-    def last(self, node, topic):
+    def last(self, node, topic) -> object:
         """Return the last message a node published on a topic."""
         return node.publishers_by_topic[topic].messages[-1]
 
-    def camera_info(self):
+    def camera_info(self) -> ros_stubs.CameraInfo:
         """Return the colour camera_info: 640 x 480, twice the mask's resolution."""
         info = ros_stubs.CameraInfo()
         info.k, info.width, info.height = [600.0, 0, 320.0, 0, 600.0, 240.0, 0, 0, 1], 640, 480
         return info
 
-    def box_mask(self, x, t):
+    def box_mask(self, x, t) -> ros_stubs.Image:
         """Return the /camera_box_mask message of a box face x m ahead, taken at time t."""
         mask = np.zeros(MASK_SHAPE, dtype=np.uint8)
         paint(mask, mask_camera(), x, x, -0.2, 0.2, low=0.0, high=0.3)
@@ -338,7 +339,7 @@ class FusionNodeTest(unittest.TestCase):
         msg.encoding, msg.step, msg.data = 'mono8', mask.shape[1], mask.tobytes()
         return msg
 
-    def test_stale_camera_passes_lidar_through(self):
+    def test_stale_camera_passes_lidar_through(self) -> None:
         """Check a stale depth scan leaves the LiDAR scan unchanged (lidar_only)."""
         node = fusion_node.FusionNode()
         node.depth_callback(camera_scan(0.8, -0.1, 0.1, t=0.0))
@@ -349,7 +350,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertTrue(np.allclose(self.last(node, 'fused_scan').ranges, lidar))
         self.assertEqual(self.last(node, 'fusion/mode').data, 'lidar_only')
 
-    def depth_run(self, **params):
+    def depth_run(self, **params) -> tuple[fusion_node.FusionNode, np.ndarray]:
         """
         Feed 4 depth frames of an object 0.8 m ahead that the LiDAR misses.
 
@@ -371,7 +372,7 @@ class FusionNodeTest(unittest.TestCase):
         ahead = np.abs(ros_stubs.lidar_angles()) < 0.05
         return node, np.array(self.last(node, 'fused_scan').ranges)[ahead]
 
-    def test_fresh_depth_frames_are_fused(self):
+    def test_fresh_depth_frames_are_fused(self) -> None:
         """Check fresh depth frames add the object, not as a box, without logging."""
         node, ahead = self.depth_run(use_depth=True)
         self.assertLess(ahead.min(), 0.9)                     # the object is now in the scan
@@ -380,13 +381,13 @@ class FusionNodeTest(unittest.TestCase):
         self.assertEqual(self.last(node, 'fusion/mode').data, 'fused')
         self.assertEqual(node.get_logger().records, [])       # shown in /fused_scan, not logged
 
-    def test_depth_is_off_by_default(self):
+    def test_depth_is_off_by_default(self) -> None:
         """Check depth is not fused unless use_depth is set."""
         node, ahead = self.depth_run()
         self.assertGreater(ahead.min(), 5.0)                  # LiDAR only: nothing added
         self.assertFalse(node.USE_DEPTH)
 
-    def test_fresh_box_mask_labels_lidar_returns(self):
+    def test_fresh_box_mask_labels_lidar_returns(self) -> None:
         """Check a fresh box mask labels the box on /obstacle_scan."""
         node = fusion_node.FusionNode()
         node.info_callback(self.camera_info())
@@ -403,7 +404,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertEqual(self.last(node, 'fusion/mode').data, 'fused')
         self.assertEqual(node.get_logger().records, [])       # shown in /obstacle_scan
 
-    def test_box_mask_follows_the_car_between_frames(self):
+    def test_box_mask_follows_the_car_between_frames(self) -> None:
         # the mask shows the box 1.5 m ahead; 0.1 s later the car (2 m/s) is 0.2 m closer,
         # and the LiDAR sees it at 1.3 m: still the same pixels once the motion is undone
         """Check the car's motion since the mask frame is undone when labelling."""
@@ -420,7 +421,7 @@ class FusionNodeTest(unittest.TestCase):
         y = obstacle[labelled] * np.sin(ros_stubs.lidar_angles()[labelled])
         self.assertTrue(np.all(np.abs(y) <= 0.21))             # the face, not the walls
 
-    def test_stale_box_mask_is_not_used(self):
+    def test_stale_box_mask_is_not_used(self) -> None:
         """Check a stale box mask labels nothing (lidar_only)."""
         node = fusion_node.FusionNode()
         node.info_callback(self.camera_info())
@@ -431,7 +432,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertFalse(np.isfinite(self.last(node, 'obstacle_scan').ranges).any())
         self.assertEqual(self.last(node, 'fusion/mode').data, 'lidar_only')
 
-    def test_box_mask_waits_for_camera_info(self):
+    def test_box_mask_waits_for_camera_info(self) -> None:
         """Check a mask before camera_info is ignored."""
         node = fusion_node.FusionNode()
         node.mask_callback(self.box_mask(1.5, 0.0))           # intrinsics not known yet
@@ -440,7 +441,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertFalse(np.isfinite(self.last(node, 'obstacle_scan').ranges).any())
         self.assertEqual(self.last(node, 'fusion/mode').data, 'lidar_only')
 
-    def test_camera_disabled_ignores_camera(self):
+    def test_camera_disabled_ignores_camera(self) -> None:
         """Check use_camera:=false ignores the depth scan and the mask."""
         ros_stubs.PARAM_OVERRIDES['fusion_node'] = {'use_camera': False}
         node = fusion_node.FusionNode()

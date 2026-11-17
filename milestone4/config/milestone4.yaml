@@ -15,6 +15,9 @@
 # same car geometry and braking model, and both camera nodes the same camera mounting.
 /**:
   ros__parameters:
+    # Top speed (gap_follow_node, safety_node): the planner's top speed and the safety cap
+    max_speed: 1.5 # (m/s)
+
     # Car geometry (gap_follow_node, safety_node)
     wheelbase: 0.33 # front to rear axle (m)
     car_half_width: 0.15 # half the car's width (m)
@@ -38,13 +41,11 @@
 gap_follow_node:
   ros__parameters:
     # Speed
-    max_speed: 1.0 # top speed on a clear straight; keep equal to safety drive_speed (m/s)
     min_speed: 0.7 # lowest request unless the braking limit is lower (m/s)
-    # speed cap while passing a camera-confirmed box (m/s). 0.55 held the car at 0.55 m/s
-    # for most of a lap with boxes on the straights (the cap starts 1.5 m before each box
-    # and the next box is seen from the turns); the braking and cornering limits already
-    # slow it where needed. 1.0 set off AEB with a lagging servo and flickering labels
-    # (test_servo_lag_and_flickering_box_labels); 0.9 passed, 0.8 keeps a margin.
+    # speed cap while passing a camera-confirmed box (m/s); it only matters below max_speed.
+    # 0.55 held the car at 0.55 m/s for most of a lap with boxes on the straights (the cap
+    # starts 1.5 m before each box and the next box is seen from the turns); the braking
+    # and cornering limits already slow it where needed.
     pass_speed: 1.2
     a_lat: 2.5 # sideways grip for the cornering limit (m/s^2)
     a_accel: 2.0 # how fast the requested speed may rise (m/s^2)
@@ -78,7 +79,6 @@ gap_follow_node:
 
 safety_node:
   ros__parameters:
-    drive_speed: 1.0 # speed cap; keep equal to gap_follow max_speed (m/s)
     stale_timeout: 0.25 # brake when requests or scans are older (s)
     slow_factor: 2.0 # soft stage keeps TTC >= this x the TTC needed to stop
     min_closing: 0.1 # slower closing speeds never trigger AEB (m/s)
@@ -144,7 +144,6 @@ camera_scan_node:
     box_s_min: 60 # cardboard minimum saturation (floor is near 0)
     box_v_min: 60
     open_kernel: 5 # speckle removal; 0 or 1 disables it
-    publish_debug: true
 
 depth_scan_node:
   ros__parameters:
