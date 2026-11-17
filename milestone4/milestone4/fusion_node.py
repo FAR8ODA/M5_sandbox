@@ -176,7 +176,7 @@ class FusionNode(Node):
 
     def shift_since(self, camera_stamp: float, lidar: LaserScan) -> float:
         """
-        Distance the car drove between a camera frame and a LiDAR scan.
+        Estimate how far the car drove between a camera frame and a LiDAR scan.
 
         Args:
             camera_stamp (float): When the camera frame was taken (s).

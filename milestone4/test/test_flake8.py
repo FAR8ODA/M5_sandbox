@@ -20,7 +20,7 @@ import pytest
 
 @pytest.mark.flake8
 @pytest.mark.linter
-def test_flake8():
+def test_flake8() -> None:
     """Check the package passes flake8 (fails listing every error)."""
     rc, errors = main_with_errors(argv=[])
     assert rc == 0, \

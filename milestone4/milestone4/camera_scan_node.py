@@ -86,7 +86,7 @@ class CameraScanNode(Node):
             LaserScan, str(self.get_parameter('box_scan_topic').value), 10)
 
     def color_info_callback(self, msg: CameraInfo) -> None:
-        """Store the colour camera model. Rebuilt on every camera_info message.
+        """Rebuild the colour camera model from a camera_info message.
 
         Args:
             msg (CameraInfo): Colour camera intrinsics.

@@ -1,5 +1,7 @@
 """Tests for the path-aware AEB safety node."""
 
+from __future__ import annotations
+
 import math
 import unittest
 
@@ -10,7 +12,7 @@ from milestone4.braking import car_motion, required_ttc, slow_speed_cap  # noqa:
 from milestone4.safety_node import MotionTracker, SafetyNode  # noqa: I100
 
 
-def corridor_world(half_width=0.8, wall_x=None):
+def corridor_world(half_width=0.8, wall_x=None) -> np.ndarray:
     """
     Return dense wall points of a straight corridor (and a wall across it at wall_x).
 
@@ -28,7 +30,8 @@ def corridor_world(half_width=0.8, wall_x=None):
     return np.vstack(walls)
 
 
-def drive(world_at, steering, speed, steps, step=0.025, on_scan=None):
+def drive(world_at, steering, speed, steps, step=0.025,
+          on_scan=None) -> tuple[float, float, float]:
     """
     Drive a simulated car at a constant steering and speed through a world.
 
@@ -53,7 +56,7 @@ def drive(world_at, steering, speed, steps, step=0.025, on_scan=None):
 class MotionTrackerTest(unittest.TestCase):
     """Obstacle speeds with the car's own motion removed."""
 
-    def track(self, world_at, steering, speed, box=None):
+    def track(self, world_at, steering, speed, box=None) -> np.ndarray:
         """
         Drive through a world and return the approach speeds measured on the last scan.
 
@@ -70,7 +73,7 @@ class MotionTrackerTest(unittest.TestCase):
         a = ros_stubs.lidar_angles()
         result = {}
 
-        def on_scan(t, ranges, x, y, yaw):
+        def on_scan(t, ranges, x, y, yaw) -> None:
             """Add one scan to the tracker and measure the selected points."""
             finite = np.isfinite(ranges)
             px = np.where(finite, ranges, 0.0) * np.cos(a)
@@ -82,23 +85,23 @@ class MotionTrackerTest(unittest.TestCase):
         drive(world_at, steering, speed, 16, on_scan=on_scan)
         return result['speeds']
 
-    def test_static_walls_stay_still_while_turning(self):
+    def test_static_walls_stay_still_while_turning(self) -> None:
         # comparing beam indices made these walls look like they approached at ~1.7 m/s
         """Check static walls get no approach speed while turning."""
         for steering in (0.05, 0.2, 0.4):
             speeds = self.track(lambda t: corridor_world(), steering, 1.5)
             self.assertLess(float(np.percentile(speeds, 99)), 0.5)
 
-    def test_approaching_box_is_measured_while_turning(self):
+    def test_approaching_box_is_measured_while_turning(self) -> None:
         """Check a box approaching at 2 m/s is measured, turning or not."""
         ys = np.arange(-0.2, 0.2, 0.005)
 
-        def world(t):
+        def world(t) -> np.ndarray:
             """Return the corridor plus the box face at time t."""
             face = np.stack([np.full_like(ys, 4.0 - 2.0 * t), ys], axis=1)   # 2 m/s towards us
             return np.vstack([corridor_world(), face])
 
-        def on_box(t, px, py, x, y, yaw):
+        def on_box(t, px, py, x, y, yaw) -> np.ndarray:
             # scan points within 5 cm of the box face, in the car frame
             """Return which scan points lie within 5 cm of the box face."""
             d = np.stack([np.full_like(ys, 4.0 - 2.0 * t), ys], axis=1) - [x, y]
@@ -112,7 +115,7 @@ class MotionTrackerTest(unittest.TestCase):
             self.assertGreater(speeds.size, 10)
             self.assertAlmostEqual(float(np.median(speeds)), 2.0, delta=0.2)
 
-    def test_new_points_have_no_speed(self):
+    def test_new_points_have_no_speed(self) -> None:
         """Check a point that just appeared gets no speed."""
         tracker = MotionTracker()
         tracker.add(0.0, np.array([3.0]), np.array([0.0]), (0.0, 0.0, 0.0))
@@ -124,17 +127,17 @@ class MotionTrackerTest(unittest.TestCase):
 class SafetyNodeTest(unittest.TestCase):
     """AEB, the soft cap, latching, the watchdog and the scan fallback."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         """Reset the clock and overrides and build a safety node."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
         self.node = SafetyNode()
 
-    def commands(self):
+    def commands(self) -> list:
         """Return every command published on /drive."""
         return self.node.publishers_by_topic['drive'].messages
 
-    def step(self, t, ranges, speed, request=None, source='fused'):
+    def step(self, t, ranges, speed, request=None, source='fused') -> None:
         """
         Advance the clock and feed odometry, one scan and optionally a drive request.
 
@@ -155,20 +158,20 @@ class SafetyNodeTest(unittest.TestCase):
         if request is not None:
             self.node.drive_request_callback(ros_stubs.make_request(*request))
 
-    def test_box_in_path_triggers_aeb_at_speed(self):
+    def test_box_in_path_triggers_aeb_at_speed(self) -> None:
         """Check a box 0.8 m ahead at 1.5 m/s triggers AEB."""
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 0.8, -0.2, 0.2)
         self.step(0.0, box, speed=1.5)
         self.assertEqual(self.node.safety_mode, 'aeb')
 
-    def test_same_box_is_fine_at_low_speed(self):
+    def test_same_box_is_fine_at_low_speed(self) -> None:
         """Check the same box at 0.3 m/s passes the request through."""
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 0.8, -0.2, 0.2)
         self.step(0.0, box, speed=0.3, request=(0.0, 0.3))
         self.assertNotEqual(self.node.safety_mode, 'aeb')
         self.assertAlmostEqual(self.commands()[-1].drive.speed, 0.3)
 
-    def test_soft_cap_slows_before_aeb(self):
+    def test_soft_cap_slows_before_aeb(self) -> None:
         """Check the soft stage caps the speed at slow_speed_cap()."""
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 1.2, -0.2, 0.2)
         self.step(0.0, box, speed=1.0, request=(0.0, 1.0))
@@ -179,7 +182,7 @@ class SafetyNodeTest(unittest.TestCase):
         expected = float(slow_speed_cap(1.2 - 0.25, 0.0, 2.0, 0.15, 2.0, 0.1))
         self.assertAlmostEqual(speed, expected, places=2)
 
-    def test_corner_walls_do_not_trigger_aeb(self):
+    def test_corner_walls_do_not_trigger_aeb(self) -> None:
         # the Milestone 3 false AEB: driving fast down a narrow section with walls beside it
         """Check walls beside a narrow straight do not trigger AEB."""
         walls = ros_stubs.corridor_ranges(0.5)
@@ -188,14 +191,14 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertEqual(self.node.safety_mode, 'normal')
         self.assertAlmostEqual(self.commands()[-1].drive.speed, 1.0)
 
-    def test_turning_at_speed_does_not_trigger_aeb(self):
+    def test_turning_at_speed_does_not_trigger_aeb(self) -> None:
         # static corridor, gentle left turn at 1.5 m/s: the per-beam range rate of an earlier
         # version saw the walls approaching here and braked
         """Check a gentle turn in a static corridor does not trigger AEB."""
         steering, speed = 0.1, 1.5
         yaw_rate = speed * math.tan(steering) / 0.33
 
-        def on_scan(t, ranges, x, y, yaw):
+        def on_scan(t, ranges, x, y, yaw) -> None:
             """Feed odometry, the scan and a drive request at time t."""
             ros_stubs.CLOCK.seconds = t
             self.node.odom_callback(ros_stubs.make_odom(speed, yaw_rate))
@@ -206,9 +209,9 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertNotIn(self.node.safety_mode, ('aeb', 'stopped'))
         self.assertGreater(self.commands()[-1].drive.speed, 0.5)   # slowed for the wall, no AEB
 
-    def test_wall_ahead_while_driving_triggers_aeb(self):
+    def test_wall_ahead_while_driving_triggers_aeb(self) -> None:
         """Check a wall across the corridor triggers AEB."""
-        def on_scan(t, ranges, x, y, yaw):
+        def on_scan(t, ranges, x, y, yaw) -> None:
             """Feed odometry and the scan at time t."""
             ros_stubs.CLOCK.seconds = t
             self.node.odom_callback(ros_stubs.make_odom(1.5))
@@ -217,7 +220,7 @@ class SafetyNodeTest(unittest.TestCase):
         drive(lambda t: corridor_world(0.8, wall_x=2.0), 0.0, 1.5, 40, on_scan=on_scan)
         self.assertEqual(self.node.safety_mode, 'aeb')
 
-    def trigger_distance(self, speed):
+    def trigger_distance(self, speed) -> float | None:
         """
         Return the box distance at which AEB engages for a car at a speed.
 
@@ -238,7 +241,7 @@ class SafetyNodeTest(unittest.TestCase):
                 return x
         return None
 
-    def test_variable_ttc_brakes_earlier_at_speed(self):
+    def test_variable_ttc_brakes_earlier_at_speed(self) -> None:
         # trigger distance = stop_margin + v x required TTC(v), which grows faster than v
         """Check the trigger distance follows the variable TTC."""
         at_1, at_2 = self.trigger_distance(1.0), self.trigger_distance(2.0)
@@ -248,14 +251,14 @@ class SafetyNodeTest(unittest.TestCase):
                                delta=0.01)
         self.assertGreater(at_2 - 0.25, 2.0 * (at_1 - 0.25))   # more than twice as far
 
-    def test_crawling_into_the_margin_triggers_aeb(self):
+    def test_crawling_into_the_margin_triggers_aeb(self) -> None:
         # at 0.2 m/s the TTC rule alone would allow a few cm; the gap to the margin does not
         """Check crawling into the stop margin triggers AEB."""
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 0.22, -0.2, 0.2)
         self.step(0.0, box, speed=0.2)
         self.assertEqual(self.node.safety_mode, 'aeb')
 
-    def test_state_shows_the_variable_threshold(self):
+    def test_state_shows_the_variable_threshold(self) -> None:
         """Check /safety/state shows the AEB and slow thresholds."""
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 2.0, -0.2, 0.2)
         self.step(0.0, box, speed=1.0, request=(0.0, 1.0))
@@ -264,7 +267,7 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertIn('aeb<0.50s', state)                      # required TTC at 1 m/s
         self.assertIn('slow<1.00s', state)                     # slow_factor x that
 
-    def test_error_in_a_callback_brakes(self):
+    def test_error_in_a_callback_brakes(self) -> None:
         """Check an error in a callback brakes and is logged."""
         self.step(0.0, ros_stubs.corridor_ranges(1.0), speed=1.0, request=(0.0, 1.0))
         broken = ros_stubs.make_scan(ros_stubs.corridor_ranges(1.0), t=0.025)
@@ -273,7 +276,7 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertEqual(self.commands()[-1].drive.speed, 0.0)
         self.assertTrue(any(level == 'error' for level, _ in self.node.get_logger().records))
 
-    def test_only_the_aeb_is_logged(self):
+    def test_only_the_aeb_is_logged(self) -> None:
         # stale -> resume -> slow -> aeb: only the latched stop is logged, once
         """Check stale, slow and resume are not logged; AEB is, once."""
         clear = ros_stubs.corridor_ranges(1.0)
@@ -293,7 +296,7 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertEqual(records[0][0], 'error')
         self.assertTrue(records[0][1].startswith('AEB engaged: obstacle on the path (TTC '))
 
-    def test_approaching_obstacle_brakes_while_stopped(self):
+    def test_approaching_obstacle_brakes_while_stopped(self) -> None:
         # the car is still; an obstacle comes towards it at 2 m/s (track_obstacles:=true)
         # Milestone 3 TTC used only our own speed, so it would never brake here
         """Check an obstacle coming at a stopped car triggers AEB."""
@@ -312,14 +315,14 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertIsNotNone(engaged_at)
         self.assertGreater(engaged_at, 0.5)
 
-    def test_static_obstacle_does_not_brake_a_stopped_car(self):
+    def test_static_obstacle_does_not_brake_a_stopped_car(self) -> None:
         """Check a static box does not trigger AEB for a stopped car."""
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 0.6, -0.2, 0.2)
         for i in range(20):
             self.step(i * 0.025, box, speed=0.0)
         self.assertNotEqual(self.node.safety_mode, 'aeb')
 
-    def test_aeb_releases_once_the_path_clears(self):
+    def test_aeb_releases_once_the_path_clears(self) -> None:
         """Check AEB is not latched: the car drives on once the path clears."""
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 0.8, -0.2, 0.2)
         self.step(0.0, box, speed=1.5)
@@ -329,7 +332,7 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertEqual(self.node.safety_mode, 'normal')      # not latched: drives on
         self.assertGreater(self.commands()[-1].drive.speed, 0.0)
 
-    def test_negative_speed_request_latches_a_stop(self):
+    def test_negative_speed_request_latches_a_stop(self) -> None:
         """Check a negative speed request latches a logged stop."""
         clear = ros_stubs.corridor_ranges(1.0)
         self.step(0.0, clear, speed=1.0, request=(0.0, -1.0))
@@ -339,7 +342,7 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertEqual(self.node.get_logger().records,
                          [('error', 'AEB engaged: stop requested (laps done)')])
 
-    def test_watchdog_brakes_when_requests_stop(self):
+    def test_watchdog_brakes_when_requests_stop(self) -> None:
         """Check the watchdog brakes on stale requests and resumes."""
         clear = ros_stubs.corridor_ranges(1.0)
         self.step(0.0, clear, speed=1.0, request=(0.0, 1.0))
@@ -354,7 +357,7 @@ class SafetyNodeTest(unittest.TestCase):
         self.assertEqual(self.node.safety_mode, 'normal')
         self.assertGreater(self.commands()[-1].drive.speed, 0.0)
 
-    def test_falls_back_to_the_raw_scan(self):
+    def test_falls_back_to_the_raw_scan(self) -> None:
         """Check the raw scan is used only while the fused scan is stale."""
         clear = ros_stubs.corridor_ranges(1.0)
         self.step(0.0, clear, speed=0.0, source='raw')
@@ -362,7 +365,7 @@ class SafetyNodeTest(unittest.TestCase):
         self.step(0.025, clear, speed=0.0, source='fused')
         self.assertIs(self.node.active_source(), self.node.sources['fused'])
 
-    def test_blocked_path_waits_then_drives_on(self):
+    def test_blocked_path_waits_then_drives_on(self) -> None:
         """Check the car waits at a blocked path and goes once it opens."""
         blocked = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 0.2, -0.3, 0.3)
         for i in range(30):                                    # held 1.5 s in front of it
@@ -372,7 +375,7 @@ class SafetyNodeTest(unittest.TestCase):
         self.step(1.5, ros_stubs.corridor_ranges(1.0), speed=0.0, request=(0.0, 1.0))
         self.assertGreater(self.commands()[-1].drive.speed, 0.0)   # path open: go again
 
-    def test_state_topic(self):
+    def test_state_topic(self) -> None:
         """Check /safety/state starts with the mode and names the scan."""
         self.step(0.0, ros_stubs.corridor_ranges(1.0), speed=0.0, request=(0.0, 1.0))
         self.node.watchdog_callback()
@@ -384,7 +387,7 @@ class SafetyNodeTest(unittest.TestCase):
 class HelpersTest(unittest.TestCase):
     """Sanity checks of the test helpers themselves."""
 
-    def test_corridor_side_beam(self):
+    def test_corridor_side_beam(self) -> None:
         """Check corridor_ranges() puts the side wall at half_width."""
         a = ros_stubs.lidar_angles()
         r = ros_stubs.corridor_ranges(0.5)
@@ -392,14 +395,10 @@ class HelpersTest(unittest.TestCase):
         self.assertAlmostEqual(float(r[left]), 0.5, places=3)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class ExitTest(unittest.TestCase):
     """Ctrl+C (or any other exit) stops the car before the node ends."""
 
-    def run_main(self, raise_in_spin):
+    def run_main(self, raise_in_spin) -> SafetyNode:
         """
         Run safety_node.main() with spin raising an exception.
 
@@ -415,12 +414,12 @@ class ExitTest(unittest.TestCase):
         class Recording(safety_node.SafetyNode):
             """SafetyNode that records each instance it creates."""
 
-            def __init__(self):
+            def __init__(self) -> None:
                 """Build the node and remember it."""
                 super().__init__()
                 made.append(self)
 
-        def spin(node):
+        def spin(node) -> None:
             """Publish a moving command, then raise the given exception."""
             node.publish_drive_command(1.0, 0.2)               # the car is moving
             raise raise_in_spin
@@ -434,7 +433,7 @@ class ExitTest(unittest.TestCase):
             safety_node.SafetyNode, safety_node.rclpy.spin = original
         return made[0]
 
-    def test_ctrl_c_stops_the_car_then_ends(self):
+    def test_ctrl_c_stops_the_car_then_ends(self) -> None:
         """Check Ctrl+C sends zero-speed commands and logs nothing."""
         node = self.run_main(KeyboardInterrupt())              # main() returns normally
         drive = node.publishers_by_topic['drive'].messages
@@ -443,13 +442,13 @@ class ExitTest(unittest.TestCase):
         self.assertTrue(all(m.drive.speed == 0.0 for m in drive[1:]))
         self.assertEqual(node.get_logger().records, [])        # nothing logged on the way out
 
-    def test_any_other_exit_also_stops_the_car(self):
+    def test_any_other_exit_also_stops_the_car(self) -> None:
         """Check any other exception still sends a zero-speed command."""
         from milestone4 import safety_node
         made = []
         original_init = safety_node.SafetyNode.__init__
 
-        def init(node):
+        def init(node) -> None:
             """Run the original __init__ and remember the node."""
             original_init(node)
             made.append(node)
@@ -466,16 +465,16 @@ class ExitTest(unittest.TestCase):
 class ObstacleSpeedRobustnessTest(unittest.TestCase):
     """Short-lived obstacle-speed readings must not set off AEB (the car-test failure)."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         """Reset the clock and overrides."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         """Clear the parameter overrides."""
         ros_stubs.PARAM_OVERRIDES.clear()
 
-    def node(self, **params):
+    def node(self, **params) -> SafetyNode:
         """Return a safety node with these parameters (tracking on by default)."""
         params.setdefault('track_obstacles', True)            # these tests are about tracking
         ros_stubs.PARAM_OVERRIDES['safety_node'] = params
@@ -483,7 +482,7 @@ class ObstacleSpeedRobustnessTest(unittest.TestCase):
         ros_stubs.PARAM_OVERRIDES.clear()
         return node
 
-    def run_glitch(self, node):
+    def run_glitch(self, node) -> list:
         """
         Drive at 0.86 m/s towards a static box; for two scans it seems 0.4 m closer.
 
@@ -496,13 +495,13 @@ class ObstacleSpeedRobustnessTest(unittest.TestCase):
         ys = np.arange(-0.25, 0.25, 0.005)
         modes = []
 
-        def world(t):
+        def world(t) -> np.ndarray:
             """Return the corridor plus the box, 0.4 m closer during the glitch."""
             glitch = 0.90 <= t < 0.95                          # two scans, box ~1.8 m away
             x = 2.6 - (0.4 if glitch else 0.0)
             return np.vstack([corridor_world(0.8), np.stack([np.full_like(ys, x), ys], 1)])
 
-        def on_scan(t, ranges, x, y, yaw):
+        def on_scan(t, ranges, x, y, yaw) -> None:
             """Feed odometry, the scan and a drive request; record the mode."""
             ros_stubs.CLOCK.seconds = t
             node.odom_callback(ros_stubs.make_odom(0.86))
@@ -513,16 +512,16 @@ class ObstacleSpeedRobustnessTest(unittest.TestCase):
         drive(world, 0.0, 0.86, 48, on_scan=on_scan)          # the box stays over 1.5 m away
         return modes
 
-    def test_short_glitch_does_not_trigger_aeb(self):
+    def test_short_glitch_does_not_trigger_aeb(self) -> None:
         """Check a two-scan range glitch does not trigger AEB."""
         self.assertNotIn('aeb', self.run_glitch(self.node()))
 
-    def test_glitch_did_trigger_aeb_without_persistence(self):
+    def test_glitch_did_trigger_aeb_without_persistence(self) -> None:
         # the old behaviour (one scan was enough): this is the false AEB from the car log
         """Check the glitch did trigger AEB with persistence 1 (old behaviour)."""
         self.assertIn('aeb', self.run_glitch(self.node(obstacle_persist_scans=1)))
 
-    def test_track_obstacles_false_ignores_obstacle_speed(self):
+    def test_track_obstacles_false_ignores_obstacle_speed(self) -> None:
         """Check track_obstacles:=false ignores an approaching box."""
         node = self.node(track_obstacles=False)
         walls = ros_stubs.corridor_ranges(1.0)
@@ -534,7 +533,7 @@ class ObstacleSpeedRobustnessTest(unittest.TestCase):
                 ros_stubs.add_box(walls, 2.5 - 2.0 * t, -0.2, 0.2), t=t))
         self.assertNotEqual(node.safety_mode, 'aeb')
 
-    def test_yaw_comes_from_the_commanded_steering(self):
+    def test_yaw_comes_from_the_commanded_steering(self) -> None:
         # odometry that publishes angular.z flipped, zero or right gives the same pose
         """Check the pose's yaw ignores the odometry angular.z."""
         yaws = []
@@ -550,7 +549,7 @@ class ObstacleSpeedRobustnessTest(unittest.TestCase):
         for yaw in yaws:
             self.assertAlmostEqual(yaw, expected)
 
-    def test_aeb_log_names_the_obstacle_speed(self):
+    def test_aeb_log_names_the_obstacle_speed(self) -> None:
         """Check the AEB log line names the obstacle as static."""
         node = self.node()
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 0.8, -0.2, 0.2)
@@ -565,23 +564,23 @@ class ObstacleSpeedRobustnessTest(unittest.TestCase):
 class FacingGateTest(unittest.TestCase):
     """Barriers seen at a shallow angle must not look like they move (the third car test)."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         """Reset the clock and overrides."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         """Clear the parameter overrides."""
         ros_stubs.PARAM_OVERRIDES.clear()
 
-    def node(self, track_obstacles=True):
+    def node(self, track_obstacles=True) -> SafetyNode:
         """Return a safety node with track_obstacles set."""
         ros_stubs.PARAM_OVERRIDES['safety_node'] = {'track_obstacles': track_obstacles}
         node = SafetyNode()
         ros_stubs.PARAM_OVERRIDES.clear()
         return node
 
-    def steering_error(self, node, commanded=0.25):
+    def steering_error(self, node, commanded=0.25) -> float:
         """
         Drive straight down a 1.2 m corridor while the node is told the car steers.
 
@@ -594,7 +593,7 @@ class FacingGateTest(unittest.TestCase):
         """
         world, worst = corridor_world(0.6), []
 
-        def on_scan(t, ranges, x, y, yaw):
+        def on_scan(t, ranges, x, y, yaw) -> None:
             """Feed a steering request, odometry and the scan; record the obstacle cap."""
             ros_stubs.CLOCK.seconds = t
             node.drive_request_callback(ros_stubs.make_request(commanded, 0.65))
@@ -605,7 +604,7 @@ class FacingGateTest(unittest.TestCase):
         drive(lambda t: world, 0.0, 0.65, 40, on_scan=on_scan)   # really goes straight
         return max(worst)
 
-    def test_tracking_is_off_by_default(self):
+    def test_tracking_is_off_by_default(self) -> None:
         """Check tracking is off by default and gives no obstacle speed."""
         node = SafetyNode()
         self.assertFalse(node.TRACK_OBSTACLES)
@@ -618,7 +617,7 @@ class FacingGateTest(unittest.TestCase):
                 ros_stubs.add_box(walls, 2.5 - 2.0 * t, -0.2, 0.2), t=t))
             self.assertEqual(node.sources['fused'].obstacle_cap, 0.0)
 
-    def test_only_surfaces_facing_the_car_count(self):
+    def test_only_surfaces_facing_the_car_count(self) -> None:
         """Check the wall across counts as facing and the side walls do not."""
         node = self.node()
         ranges = ros_stubs.world_scan(corridor_world(0.5, wall_x=2.0), 0.0, 0.0, 0.0)
@@ -629,7 +628,7 @@ class FacingGateTest(unittest.TestCase):
         shallow = (np.abs(bearing) >= 18.0) & (np.abs(bearing) <= 40.0)  # the side walls
         self.assertFalse(np.any(facing[shallow]))
 
-    def test_steering_error_does_not_make_the_barriers_move(self):
+    def test_steering_error_does_not_make_the_barriers_move(self) -> None:
         # the node thinks the car turns (0.25 rad commanded) while it goes straight, like a
         # servo that does not follow the command: no obstacle speed and no AEB
         """Check a steering mismatch gives no barrier speed and no AEB."""
@@ -637,14 +636,14 @@ class FacingGateTest(unittest.TestCase):
         self.assertLess(self.steering_error(node), 0.1)
         self.assertNotEqual(node.safety_mode, 'aeb')
 
-    def test_steering_error_did_make_the_barriers_move_without_the_gate(self):
+    def test_steering_error_did_make_the_barriers_move_without_the_gate(self) -> None:
         # the old behaviour: the side walls seemed to rush at the car (car test: 1.2-1.5 m/s)
         """Check the barriers did seem to move without the facing gate."""
         node = self.node()
         node.facing = lambda source: np.ones(source.ranges.size, dtype=bool)
         self.assertGreater(self.steering_error(node), 1.0)
 
-    def test_a_box_coming_at_the_car_keeps_its_speed(self):
+    def test_a_box_coming_at_the_car_keeps_its_speed(self) -> None:
         """Check a box coming at the car still gets its speed."""
         node = self.node()
         walls = ros_stubs.corridor_ranges(1.0)
@@ -662,7 +661,7 @@ class FacingGateTest(unittest.TestCase):
 class ScanLagTest(unittest.TestCase):
     """Scans that arrive late must be matched with where the car was when they were taken."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         """Build a safety node with tracking on."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
@@ -670,14 +669,14 @@ class ScanLagTest(unittest.TestCase):
         self.node = SafetyNode()
         ros_stubs.PARAM_OVERRIDES.clear()
 
-    def odom(self, t, speed=1.0):
+    def odom(self, t, speed=1.0) -> None:
         """Feed one stamped odometry message at time t."""
         ros_stubs.CLOCK.seconds = t
         msg = ros_stubs.make_odom(speed)
         msg.header.stamp = ros_stubs.stamp(t)
         self.node.odom_callback(msg)
 
-    def test_pose_at_interpolates_and_extrapolates(self):
+    def test_pose_at_interpolates_and_extrapolates(self) -> None:
         """Check pose_at() interpolates, extrapolates and clamps."""
         for i in range(5):                                     # 1 m/s straight, 0.1 s apart
             self.odom(1.0 + 0.1 * i)
@@ -686,7 +685,7 @@ class ScanLagTest(unittest.TestCase):
         self.assertAlmostEqual(self.node.pose_at(1.50)[0], 0.50, places=6)   # ahead of it
         self.assertAlmostEqual(self.node.pose_at(0.50)[0], 0.00, places=6)   # before: oldest
 
-    def test_lag_spike_does_not_create_an_obstacle_speed(self):
+    def test_lag_spike_does_not_create_an_obstacle_speed(self) -> None:
         # the second car test: a static scene, scans reaching the node up to 0.4 s late and
         # then in a burst. Matching them with the pose on arrival gave about 2.4 m/s.
         """Check late scans in a burst give no obstacle speed."""
@@ -707,7 +706,7 @@ class ScanLagTest(unittest.TestCase):
         self.assertLess(worst, 0.1)
         self.assertNotEqual(self.node.safety_mode, 'aeb')
 
-    def test_old_scan_counts_as_closer(self):
+    def test_old_scan_counts_as_closer(self) -> None:
         # a box 1.0 m ahead seen 0.3 s ago at 1 m/s is really about 0.7 m ahead now
         """Check a late scan counts the distance driven since it was taken."""
         box = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 1.0, -0.2, 0.2)
@@ -721,7 +720,7 @@ class ScanLagTest(unittest.TestCase):
         self.assertEqual(fresh.safety_mode, 'normal')          # 0.75 m gap at 1 m/s: fine
         self.assertEqual(self.node.safety_mode, 'aeb')         # only 0.45 m really: brake
 
-    def test_lag_is_reported(self):
+    def test_lag_is_reported(self) -> None:
         """Check the scan lag is on /safety/state and not logged."""
         ros_stubs.CLOCK.seconds = 1.3
         self.node.fused_scan_callback(ros_stubs.make_scan(ros_stubs.corridor_ranges(1.0), t=1.0))
@@ -730,7 +729,7 @@ class ScanLagTest(unittest.TestCase):
         self.assertIn('lag=300ms', state)                     # on the topic, not in the log
         self.assertEqual(self.node.get_logger().records, [])
 
-    def test_drive_requests_reuse_the_obstacle_speeds(self):
+    def test_drive_requests_reuse_the_obstacle_speeds(self) -> None:
         """Check obstacle speeds are computed once per scan, not per request."""
         calls = []
         tracker = self.node.sources['fused'].tracker
@@ -741,3 +740,7 @@ class ScanLagTest(unittest.TestCase):
         for _ in range(5):
             self.node.drive_request_callback(ros_stubs.make_request(0.1, 1.0))
         self.assertEqual(len(calls), 1)                        # once per scan, not per request
+
+
+if __name__ == '__main__':
+    unittest.main()

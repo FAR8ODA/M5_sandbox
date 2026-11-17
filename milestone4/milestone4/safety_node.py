@@ -41,7 +41,7 @@ class MotionTracker:
                  max_speed: float = 6.0, bin_width: float = math.radians(0.25),
                  smooth_tol: float = 0.1) -> None:
         """
-        Store the settings.
+        Store the tracking settings and start with no scan history.
 
         Args:
             baseline (float): Compare with a scan at least this old (s); a longer baseline
@@ -181,7 +181,7 @@ class ScanSource:
 
     def __init__(self, name: str, persist_scans: int = 4) -> None:
         """
-        Start empty.
+        Start with no scan stored yet.
 
         Args:
             name (str): 'fused' or 'raw'.
@@ -311,7 +311,7 @@ class SafetyNode(Node):
 
     def odom_callback(self, msg: Odometry) -> None:
         """
-        Update the measured forward speed.
+        Store the measured forward speed and move the dead-reckoned pose on to this message.
 
         Args:
             msg (Odometry): Incoming odometry message.
@@ -426,7 +426,7 @@ class SafetyNode(Node):
 
     def fused_scan_callback(self, msg: LaserScan) -> None:
         """
-        Store and check a fused scan.
+        Handle a scan from fusion_node: store it and brake at once if it is unsafe.
 
         Args:
             msg (LaserScan): Scan from fusion_node.
@@ -435,7 +435,7 @@ class SafetyNode(Node):
 
     def raw_scan_callback(self, msg: LaserScan) -> None:
         """
-        Store and check a raw LiDAR scan (used only while the fused scan is stale).
+        Handle a raw LiDAR scan, which is only checked while the fused scan is stale.
 
         Args:
             msg (LaserScan): Raw scan from the LiDAR.

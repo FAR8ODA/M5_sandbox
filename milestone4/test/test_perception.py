@@ -11,7 +11,7 @@ from milestone4.camera_model import CameraModel, ground_points  # noqa: I100
 from milestone4.depth import depth_ranges, DepthBandParams  # noqa: I100
 
 
-def loop_first_hit_rows(mask, horizon_row, ignore_bottom_rows):
+def loop_first_hit_rows(mask, horizon_row, ignore_bottom_rows) -> np.ndarray:
     """Milestone 3 version (a Python loop), to check the vectorised one against."""
     height, width = mask.shape
     row_top = max(0, int(np.floor(horizon_row)) + 1)
@@ -26,7 +26,7 @@ def loop_first_hit_rows(mask, horizon_row, ignore_bottom_rows):
     return hits
 
 
-def camera(width=640, height=480, f=380.0, pitch_deg=10.0):
+def camera(width=640, height=480, f=380.0, pitch_deg=10.0) -> CameraModel:
     """
     Return a camera model like the D435i colour camera, tilted down to see the floor.
 
@@ -45,7 +45,7 @@ def camera(width=640, height=480, f=380.0, pitch_deg=10.0):
 class BoundaryTest(unittest.TestCase):
     """The colour-scan geometry."""
 
-    def test_vectorised_hit_rows_match_the_loop(self):
+    def test_vectorised_hit_rows_match_the_loop(self) -> None:
         """Check _first_hit_rows() matches the Milestone 3 loop."""
         rng = np.random.default_rng(1)
         mask = (rng.random((120, 160)) > 0.97).astype(np.uint8) * 255
@@ -53,14 +53,14 @@ class BoundaryTest(unittest.TestCase):
             self.assertTrue(np.array_equal(_first_hit_rows(mask, horizon, bottom),
                                            loop_first_hit_rows(mask, horizon, bottom)))
 
-    def test_bin_points_keeps_the_nearest(self):
+    def test_bin_points_keeps_the_nearest(self) -> None:
         """Check _bin_points() keeps the nearest point per beam."""
         ranges = np.full(3, 4.0, dtype=np.float32)
         _bin_points(np.array([1.0, 2.0]), np.array([0.0, 0.0]), ranges, -0.1, 0.1)
         self.assertAlmostEqual(float(ranges[1]), 1.0)
         self.assertEqual(float(ranges[0]), 4.0)
 
-    def test_mask_row_becomes_its_floor_distance(self):
+    def test_mask_row_becomes_its_floor_distance(self) -> None:
         """Check a masked row's range equals its floor distance."""
         cam = camera()
         mask = np.zeros((480, 640), dtype=np.uint8)
@@ -73,7 +73,7 @@ class BoundaryTest(unittest.TestCase):
         self.assertAlmostEqual(float(result.ranges[centre]),
                                float(np.hypot(forward[0], lateral[0])), places=2)
 
-    def test_box_must_stand_on_the_floor(self):
+    def test_box_must_stand_on_the_floor(self) -> None:
         # tan furniture behind the track's black ducting has the colour of a box, but in the
         # image it stands on the ducting, not on the floor
         """Check box pixels standing on the ducting are dropped."""
@@ -85,7 +85,7 @@ class BoundaryTest(unittest.TestCase):
         on_floor = np.zeros_like(wall)
         on_floor[380:420, 300:400] = 255                       # a box on the floor
 
-        def seen(box, below):
+        def seen(box, below) -> int:
             """Return how many beams of mask_scan() saw something."""
             result = mask_scan(box, cam, 90, 4.0, not_below=below, contact_rows=4)
             return int(np.sum(result.ranges < 4.0))
@@ -101,7 +101,7 @@ class DepthTest(unittest.TestCase):
     W, H, F = 640, 480, 380.0
     MOUNT, PITCH = 0.187, 10.0
 
-    def floor_depth(self):
+    def floor_depth(self) -> np.ndarray:
         """Return the depth image (m) of a flat floor seen by the camera tilted down by PITCH."""
         p = math.radians(self.PITCH)
         rows = np.arange(self.H, dtype=float)[:, None]
@@ -110,12 +110,12 @@ class DepthTest(unittest.TestCase):
             z = np.where(drop > 1e-6, self.MOUNT / drop, 0.0)
         return np.repeat(z, self.W, axis=1)
 
-    def params(self, floor_reject):
+    def params(self, floor_reject) -> DepthBandParams:
         """Return depth band settings for this camera, with or without floor rejection."""
         return DepthBandParams(band_top=-40, band_bottom=200, floor_reject=floor_reject,
                                mount_height=self.MOUNT, pitch_deg=self.PITCH)
 
-    def test_floor_is_rejected(self):
+    def test_floor_is_rejected(self) -> None:
         """Check an empty floor reads as nothing seen once rejected."""
         depth = self.floor_depth()
         c = self.W / 2.0
@@ -124,7 +124,7 @@ class DepthTest(unittest.TestCase):
         self.assertLess(kept.min(), 2.0)                       # Milestone 3: floor looks solid
         self.assertTrue(np.all(rejected == DepthBandParams().range_max))   # nothing seen
 
-    def test_box_is_still_seen(self):
+    def test_box_is_still_seen(self) -> None:
         """Check a box 1 m ahead is still seen with floor rejection on."""
         depth = self.floor_depth()
         p = math.radians(self.PITCH)
@@ -149,7 +149,7 @@ class DepthTest(unittest.TestCase):
 class MaskTest(unittest.TestCase):
     """Wall and box masks (need OpenCV)."""
 
-    def test_wall_and_box_masks_are_separate(self):
+    def test_wall_and_box_masks_are_separate(self) -> None:
         """Check ducting and cardboard go to separate, non-overlapping masks."""
         from milestone4.masks import MaskParams, split_masks
         img = np.full((100, 100, 3), 180, dtype=np.uint8)      # light grey floor
@@ -163,15 +163,11 @@ class MaskTest(unittest.TestCase):
         self.assertFalse(np.any((wall > 0) & (box > 0)))
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 @unittest.skipUnless(ros_stubs.HAVE_CV2, 'OpenCV not installed')
 class CameraScanNodeTest(unittest.TestCase):
     """The box mask is always published; the scans only while someone subscribes."""
 
-    def frame(self, node, subscribers):
+    def frame(self, node, subscribers) -> None:
         """
         Feed one synthetic colour frame (ducting and a box) to the node.
 
@@ -187,7 +183,7 @@ class CameraScanNodeTest(unittest.TestCase):
         node.publishers_by_topic['camera_box_scan'].subscribers = subscribers
         node.color_callback(ros_stubs.Image())
 
-    def test_scans_only_when_subscribed(self):
+    def test_scans_only_when_subscribed(self) -> None:
         """Check the mask is always published and the scans only with subscribers."""
         from milestone4.camera_scan_node import CameraScanNode
         info = ros_stubs.CameraInfo()
@@ -203,7 +199,7 @@ class CameraScanNodeTest(unittest.TestCase):
         self.assertEqual(len(node.publishers_by_topic['camera_box_scan'].messages), 1)
         self.assertEqual(len(node.publishers_by_topic['camera_box_mask'].messages), 2)
 
-    def test_box_mask_is_the_cardboard_at_half_resolution(self):
+    def test_box_mask_is_the_cardboard_at_half_resolution(self) -> None:
         """Check the mask is mono8 at half resolution and marks only the box."""
         from milestone4.camera_scan_node import CameraScanNode
         info = ros_stubs.CameraInfo()
@@ -218,7 +214,7 @@ class CameraScanNodeTest(unittest.TestCase):
         self.assertEqual(int(mask[:185].sum()), 0)             # the ducting and floor are not
         self.assertEqual(int(mask[:, :135].sum()), 0)
 
-    def test_box_scan_ignores_tan_above_the_ducting(self):
+    def test_box_scan_ignores_tan_above_the_ducting(self) -> None:
         """Check tan above the ducting is not in the box scan, a box on the floor is."""
         from milestone4.camera_scan_node import CameraScanNode
         info = ros_stubs.CameraInfo()
@@ -228,7 +224,7 @@ class CameraScanNodeTest(unittest.TestCase):
         node.publishers_by_topic['camera_box_scan'].subscribers = 1   # e.g. rviz
         tan = (40, 120, 200)                                   # cardboard colour (BGR)
 
-        def box_ranges(img):
+        def box_ranges(img) -> np.ndarray:
             """Feed one image and return the published box scan ranges."""
             node.bridge.imgmsg_to_cv2 = lambda msg, desired_encoding='bgr8': img
             node.color_callback(ros_stubs.Image())
@@ -242,3 +238,7 @@ class CameraScanNodeTest(unittest.TestCase):
         on_floor = np.full((480, 640, 3), 180, dtype=np.uint8)
         on_floor[380:420, 280:360] = tan                       # a box on the track
         self.assertTrue(np.any(box_ranges(on_floor) < 4.0))
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -191,7 +191,7 @@ class GapFollowNode(Node):
 
     def lookahead_speed(self) -> float:
         """
-        Speed that sets the pure-pursuit lookahead.
+        Return the speed used to size the pure-pursuit lookahead.
 
         The car's measured speed, which only drops as fast as the car can brake. Using the
         requested speed instead made the lookahead collapse the moment the planner asked to
@@ -236,7 +236,7 @@ class GapFollowNode(Node):
 
     def fused_callback(self, msg: LaserScan) -> None:
         """
-        Drive on the fused scan (the normal case).
+        Plan a drive request from a fused scan (the normal case), noting when it arrived.
 
         Args:
             msg (LaserScan): Scan from fusion_node.
@@ -246,7 +246,7 @@ class GapFollowNode(Node):
 
     def raw_callback(self, msg: LaserScan) -> None:
         """
-        Drive on the raw LiDAR scan only while the fused scan is stale (SCAN_TIMEOUT).
+        Plan from the raw LiDAR scan, but only while the fused scan is stale (SCAN_TIMEOUT).
 
         Args:
             msg (LaserScan): Raw scan from the LiDAR.
@@ -256,7 +256,7 @@ class GapFollowNode(Node):
 
     def box_beams(self, num_beams: int) -> np.ndarray:
         """
-        Beams of the current scan that count as camera-confirmed boxes (debounced).
+        Return which beams of the current scan count as camera-confirmed boxes (debounced).
 
         Args:
             num_beams (int): Number of beams in the scan being processed.
@@ -412,7 +412,7 @@ class GapFollowNode(Node):
 
     def lane_offset(self, ranges: np.ndarray, angles: np.ndarray) -> float:
         """
-        How far the middle between the walls beside the car is to its left.
+        Measure how far the middle of the lane, between the walls beside the car, is to its left.
 
         The gap target alone pulls the car to the middle only weakly, so a small steering
         pull (servo trim) kept it riding along one wall on the straights.
@@ -460,7 +460,7 @@ class GapFollowNode(Node):
     def calculate_steering_angle(self, angle: float, distance: float,
                                  lane_offset: float = 0.0) -> float:
         """
-        Pure-pursuit steering to a point on the target beam, clamped and smoothed.
+        Steer towards a point on the target beam with pure pursuit, then clamp and smooth it.
 
         The disparity extender guarantees the car can drive straight along the target beam,
         so the car must turn onto that beam before it reaches the obstacle beside it. The
@@ -518,7 +518,7 @@ class GapFollowNode(Node):
 
     def side_distance(self, ranges: np.ndarray, angles: np.ndarray, steering: float) -> float:
         """
-        Nearest thing beside the car on the side it is turning to.
+        Return the nearest reading beside the car on the side it is turning to.
 
         Uses the LiDAR beams between ±SIDE_ANGLE and ±SIDE_MAX_ANGLE, beside the car, which
         the camera cannot see. Further back the beams can hit the car's own body, and any
@@ -546,7 +546,7 @@ class GapFollowNode(Node):
 
     def path_clearance(self, scan: LaserScan, angles: np.ndarray, steering: float) -> float:
         """
-        Free distance along the arc the car is about to drive (the planned path).
+        Return the free distance along the arc the car is about to drive (the planned path).
 
         Uses the scan without the MAX_RANGE cap (a far wall is not an obstacle at 5 m) and the
         same corridor as the safety node (half the car plus path_margin). A wider one made the
@@ -590,7 +590,7 @@ class GapFollowNode(Node):
 
     def braking_limit(self, free: float) -> float:
         """
-        Highest speed that keeps the TTC to the path PLAN_FACTOR times the TTC needed to stop.
+        Return the highest speed that keeps PLAN_FACTOR x the TTC needed to stop.
 
         PLAN_FACTOR is a little more than the safety node's slow_factor, so the planner
         always asks for a speed the safety node will not have to cut.
@@ -608,7 +608,7 @@ class GapFollowNode(Node):
 
     def cornering_limit(self, steering: float) -> float:
         """
-        Highest speed the tyres can hold on the arc of a steering angle.
+        Return the highest speed the tyres can hold on the arc of a steering angle.
 
         Sideways acceleration is v^2 * curvature, with curvature = tan(steering) / wheelbase,
         so v = sqrt(A_LAT / curvature).
@@ -624,7 +624,7 @@ class GapFollowNode(Node):
 
     def calculate_speed(self, free: float, steering: float, passing: bool) -> float:
         """
-        Speed request (variable speed): the lowest of the physical limits.
+        Pick the speed to request: the lowest of the physical limits (variable speed).
 
         MAX_SPEED, the braking limit for the free distance on the planned path, the
         cornering limit for the steering angle, and PASS_SPEED while passing a box.
