@@ -30,24 +30,29 @@ class SignatureTest(unittest.TestCase):
     """LiDAR signatures and similarity."""
 
     def setUp(self):
+        """Reset the clock and overrides and build a lap counter."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
         self.node = LapCounterNode()
 
     def signature(self, ranges):
+        """Return the LiDAR signature of a set of ranges."""
         return self.node.lidar_signature(self.node.lidar_profile(ros_stubs.make_scan(ranges)))
 
     def test_same_view_scores_one(self):
+        """Check a view compared with itself scores 1."""
         s = self.signature(start_view())
         self.assertAlmostEqual(float(np.dot(s, s)), 1.0)
 
     def test_corner_scores_low_and_straight_scores_high(self):
+        """Check a corner scores below 0.5 and another straight above 0.8."""
         start = self.signature(start_view())
         self.assertLess(float(np.dot(start, self.signature(away_view()))), 0.5)   # re-arms
         # another straight looks alike: this is why the odometry gate and the peak are needed
         self.assertGreater(float(np.dot(start, self.signature(straight_view()))), 0.8)
 
     def test_flat_profile_has_no_signature(self):
+        """Check a constant profile gives an all-zero signature."""
         self.assertFalse(unit_signature(np.full(10, 3.0)).any())
 
 
@@ -55,6 +60,7 @@ class LateCameraTest(unittest.TestCase):
     """The camera reference when the RealSense starts after the LiDAR."""
 
     def setUp(self):
+        """Build a lap counter whose frames all become the same fake thumbnail."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
         self.node = LapCounterNode()
@@ -64,7 +70,14 @@ class LateCameraTest(unittest.TestCase):
             48, 64, 3) % 17
 
     def run_start(self, camera_from, speed=0.0, until=1.5):
-        """Run the start: LiDAR from t=0, camera frames from camera_from seconds."""
+        """
+        Run the start: LiDAR from t=0, camera frames from camera_from seconds.
+
+        Args:
+            camera_from (float): Time the first camera frame arrives (s).
+            speed (float): Odometry speed throughout (m/s).
+            until (float): Time to stop at (s).
+        """
         node, t = self.node, 0.0
         while t < until:
             ros_stubs.CLOCK.seconds = t
@@ -76,11 +89,13 @@ class LateCameraTest(unittest.TestCase):
             t += 0.05
 
     def test_late_camera_still_gets_a_reference(self):
+        """Check a camera starting 1 s late still gets a reference near the start."""
         self.run_start(camera_from=1.0)                       # LiDAR reference at 0.3 s
         self.assertIsNotNone(self.node.lidar_reference)
         self.assertIsNotNone(self.node.cam_reference)
 
     def test_camera_after_the_car_left_is_not_used(self):
+        """Check late frames after the car left the start are not used."""
         self.run_start(camera_from=1.0, speed=1.0)            # 1 m away by then
         self.assertIsNone(self.node.cam_reference)            # laps on the LiDAR only
         self.assertIsNotNone(self.node.lidar_reference)
@@ -91,12 +106,14 @@ class CounterTest(unittest.TestCase):
     """The counting state machine and the odometry distance gate."""
 
     def setUp(self):
+        """Build a LiDAR-only, two-lap counter."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
         ros_stubs.PARAM_OVERRIDES['lap_counter_node'] = {'use_camera': False, 'num_laps': 2}
         self.node = LapCounterNode()
 
     def tearDown(self):
+        """Clear the parameter overrides."""
         ros_stubs.PARAM_OVERRIDES.clear()
 
     def search(self, distance):
@@ -108,16 +125,26 @@ class CounterTest(unittest.TestCase):
         self.node.distance = distance
 
     def test_distance_gate_blocks_an_early_lap(self):
+        """Check a match before the lap gate is rejected and disarms."""
         self.search(distance=2.0)                             # below min_lap_distance (5 m)
         laps = [self.node.update_counter(0.95, t) for t in (0.0, 0.05, 0.1)]
         self.assertFalse(any(laps))
         self.assertFalse(self.node.armed)                     # must leave the start view again
 
     def feed(self, scores):
-        """Feed scores 0.05 s apart; return which ticks counted a lap."""
+        """
+        Feed scores 0.05 s apart.
+
+        Args:
+            scores: Combined scores, one per tick.
+
+        Returns:
+            list: True for each tick that counted a lap.
+        """
         return [self.node.update_counter(s, i * 0.05) for i, s in enumerate(scores)]
 
     def test_lap_counts_at_the_peak(self):
+        """Check the lap counts when the score falls past its peak and sets the gate."""
         self.search(distance=6.0)
         # confirmed on the 3rd tick, still rising, counted once the score falls past its peak
         laps = self.feed([0.85, 0.85, 0.86, 0.90, 0.97, 0.99, 0.93])
@@ -126,6 +153,7 @@ class CounterTest(unittest.TestCase):
         self.assertAlmostEqual(self.node.lap_gate(), 5.1)     # max(5, 0.85 x 6)
 
     def test_flat_peak_counts_after_the_timeout(self):
+        """Check a flat peak counts once, after PEAK_TIMEOUT."""
         self.search(distance=6.0)
         laps = self.feed([0.9] * 30)
         self.assertTrue(any(laps))
@@ -133,10 +161,12 @@ class CounterTest(unittest.TestCase):
         self.assertGreaterEqual(laps.index(True) * 0.05, 1.0)  # PEAK_TIMEOUT after confirming
 
     def test_gate_follows_the_first_lap(self):
+        """Check the gate is lap_distance_fraction of lap 1."""
         self.node.first_lap_distance = 20.0
         self.assertAlmostEqual(self.node.lap_gate(), 17.0)
 
     def test_no_odometry_skips_the_gate(self):
+        """Check the distance gate is skipped without odometry."""
         self.search(distance=0.0)
         self.node.last_odom_time = None
         laps = self.feed([0.95, 0.95, 0.95, 0.5])
@@ -145,6 +175,7 @@ class CounterTest(unittest.TestCase):
     def test_arms_on_distance_when_the_score_stays_high(self):
         # between solid walls the LiDAR score never drops below rearm_threshold (0.64 at its
         # lowest in the closed-loop simulator), so the score alone never armed the counter
+        """Check the counter arms on distance when the score never drops."""
         self.node.phase = 'search'
         self.node.last_odom_time = 0.0
         self.node.distance = 2.0                              # under half the 5 m lap gate
@@ -156,16 +187,19 @@ class CounterTest(unittest.TestCase):
         self.assertEqual(sum(laps), 1)
 
     def test_no_odometry_still_needs_the_score_drop(self):
+        """Check that without odometry only a score drop arms the counter."""
         self.node.phase = 'search'
         self.node.distance = 100.0                            # meaningless without odometry
         self.assertFalse(any(self.feed([0.65, 0.9, 0.9, 0.9, 0.95, 0.9])))
         self.assertFalse(self.node.armed)
 
     def test_full_run_on_lidar_only(self):
+        """Check two laps on LiDAR only, the latched stop and the log lines."""
         node = self.node
         t = 0.0
 
         def tick(view, speed):
+            """Feed odometry and one scan of a view at this speed, tick, and advance 0.05 s."""
             nonlocal t
             ros_stubs.CLOCK.seconds = t
             node.odom_callback(ros_stubs.make_odom(speed))

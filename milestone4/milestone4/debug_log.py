@@ -1,9 +1,7 @@
 """
-Text for the debug topics (no ROS code).
+JSON encoding for the gap_follow/debug and safety/debug String topics (no ROS code).
 
-gap_follow_node and safety_node each publish one line of JSON per decision on
-gap_follow/debug and safety/debug (std_msgs/String), so a run can be recorded with
-ros2 bag and read afterwards without any custom message type.
+One line per decision, so a run can be recorded with ros2 bag without custom messages.
 """
 
 from __future__ import annotations
@@ -26,6 +24,7 @@ def encode(**fields) -> str:
         str: The JSON text, e.g. '{"t":12.35,"free":null,"limit":"max"}'.
     """
     def clean(value):
+        """Return value as a JSON-safe scalar: rounded float, or None for inf/NaN."""
         if value is None or isinstance(value, (bool, str, int)):
             return value
         value = float(value)

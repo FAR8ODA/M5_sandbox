@@ -1,17 +1,4 @@
-"""ROS 2 node: colour camera to a box mask and LaserScans of the track walls and boxes.
-
-Subscribes to the RealSense colour image and camera_info. Each frame is masked
-once into walls (black ducting) and boxes (cardboard), and published as:
-
-    camera_box_mask   which pixels are cardboard (mono8, every mask_step-th pixel). The
-                      fusion node projects each LiDAR return into it to label boxes.
-    camera_scan       walls and boxes together as a LaserScan (as in Milestone 3)
-    camera_box_scan   boxes only, as a LaserScan
-
-The mask is published for every frame. The two scans and the debug image on
-``camera_scan/debug`` are for viewing and tuning (rviz), so they are only built while
-someone subscribes to them.
-"""
+"""ROS 2 node: colour camera -> box mask, plus wall/box LaserScans for viewing."""
 
 from typing import Optional
 
@@ -29,7 +16,14 @@ from sensor_msgs.msg import CameraInfo, Image, LaserScan
 
 
 class CameraScanNode(Node):
-    """Publish LaserScans computed from the colour camera image."""
+    """
+    Publish a box mask and LaserScans computed from the colour camera image.
+
+    Subscribes to color_topic and color_info_topic (frames before camera_info are
+    ignored). Publishes, every frame, camera_box_mask (mono8, every mask_step-th
+    pixel, used by fusion_node); and only while subscribed, camera_scan (walls and
+    boxes), camera_box_scan (boxes only) and camera_scan/debug (overlay image).
+    """
 
     def __init__(self) -> None:
         """Declare parameters and create the subscriptions and publishers."""
@@ -159,8 +153,10 @@ class CameraScanNode(Node):
         Returns:
             Image: The reduced mask.
         """
+        # subsample rows and columns; contiguous so tobytes() gives packed rows
         step = max(1, int(self.get_parameter('mask_step').value))
         small = np.ascontiguousarray(mask[::step, ::step])
+        # mono8: one byte per pixel, so the row step equals the width
         image = Image()
         image.header = header
         image.height, image.width = int(small.shape[0]), int(small.shape[1])
@@ -203,6 +199,7 @@ class CameraScanNode(Node):
                 self.box_scan_publisher.publish(
                     self.to_laserscan(box_result, msg.header.stamp))
 
+            # the combined scan is needed by the debug overlay or a camera_scan subscriber
             debug = (self.get_parameter('publish_debug').value
                      and self.debug_publisher.get_subscription_count() > 0)
             if not debug and self.scan_publisher.get_subscription_count() == 0:
@@ -223,7 +220,12 @@ class CameraScanNode(Node):
 
 
 def main(args=None) -> None:
-    """Run the camera scan node."""
+    """
+    Run the camera scan node until interrupted (console entry point).
+
+    Args:
+        args: Command-line arguments passed to rclpy.init (None = sys.argv).
+    """
     rclpy.init(args=args)
     node = CameraScanNode()
     try:

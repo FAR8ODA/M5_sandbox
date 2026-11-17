@@ -1,47 +1,10 @@
 """
-Path-aware AEB safety node for the F1Tenth vehicle (Milestone 4).
+ROS 2 node: path-aware AEB, speed cap and watchdog; the only publisher of /drive.
 
-The gap-follow node requests steering and speed. This node owns vehicle speed and is
-the only node that publishes commands to /drive.
-
-Kept from Milestone 3:
-    Odom Sign Fix: abs() on the odometry speed (it can read negative going forward).
-    Watchdog: if drive requests or scans stop for stale_timeout, the car brakes.
-    Latched Stop: a negative speed on drive_request stops the car for good (lap counter).
-
-New in Milestone 4:
-    Path-aware corridor: only points the car would actually hit on its current arc
-        (from the commanded steering) count. Walls beside the path in a corner no longer
-        trigger AEB, which was our Milestone 3 false-braking problem.
-    Variable TTC: AEB fires when the time-to-collision (to the safety margin) is shorter
-        than the time the car needs to stop, t_react + v / (2 a_brake) + ttc_margin, which
-        grows with our speed and with the obstacle's own speed (braking.required_ttc).
-        Faster laps brake earlier (Milestone 2 used a fixed TTC and braked too late).
-    Dynamic obstacles (track_obstacles:=true, off by default): the scan from about 0.1 s ago
-        is moved by the car's own motion (odometry speed, and the yaw rate of the commanded
-        steering) and matched with the current scan, so static walls stay still even while
-        turning. An obstacle's own speed only counts on a surface that faces the car, if
-        neighbouring points on the path agree on it and it lasts for obstacle_persist_scans
-        scans in a row; then it adds to the closing speed and to the variable TTC threshold.
-        Short-lived readings (servo lag, timing jitter, LiDAR edge noise) can no longer set
-        off AEB in a static scene, and neither can barriers seen at a shallow angle when the
-        car steers more or less than commanded.
-    Capture times: every scan is matched with the car's pose at the time it was taken (its
-        header stamp, from a pose history built from stamped odometry), not when it arrived.
-        On a busy Jetson scans can arrive late and in bursts; pairing them with the pose at
-        arrival made static walls look like they were rushing at the car. Distances are also
-        shortened by how far the car drove since the scan was taken.
-    Two stages: below slow_factor times the required TTC the speed is capped so the TTC
-        stays there (soft); below the required TTC AEB brakes (hard). It is not latched:
-        once the TTC is back above the threshold (the path opened up), the car drives on.
-    Sensor fallback: /fused_scan is used normally; if it goes stale, the raw /scan.
-    Fail safe: any error inside a callback brakes instead of stopping the node.
-    Stop on exit: on Ctrl+C (or any other exit) the node sends a zero-speed /drive
-        command before it ends, so the car is never left with a moving last command.
-    Logs: "AEB engaged: <reason>", once each time AEB brakes and once for the lap counter's
-        final stop. The mode is on /safety/state.
-    Debug topic: every drive request and what was done with it is published on safety/debug
-        as one line of JSON (only while something is subscribed, e.g. ros2 bag record).
+Drive requests are checked against the points on the commanded arc using a variable
+TTC (braking.py): soft speed cap below slow_factor x the required TTC, AEB below it
+(not latched). A negative requested speed latches a permanent stop. Stale inputs,
+callback errors and node exit all brake.
 """
 
 # include needed imports
@@ -67,19 +30,10 @@ class MotionTracker:
     """
     Measure how fast scan points move towards the car by themselves.
 
-    Comparing the same beam index between scans does not work: when the car turns, a beam
-    points at a different part of the world each scan, so static walls look like they are
-    moving. Instead, the points of a scan about `baseline` seconds old are moved into the
-    current frame using the car's own motion between the two scans (the poses dead-reckoned
-    from odometry) and sorted into bearing bins. A static object then has the same range at
-    the same bearing in both scans; only real movement is left over. For each current point,
-    the old range is the nearest one in its bin and the two bins beside it, so sampling gaps
-    can only make the old range shorter (no approach), never longer (a false approach).
-
-    A speed is only trusted where the surface is smooth in both scans (the ranges in the
-    three bins agree within smooth_tol). Edges, walls seen at a grazing angle and surfaces
-    that are just being hidden or revealed are not, and they are where false speeds came
-    from; a real obstacle's face is smooth.
+    A scan about `baseline` seconds old is moved into the current frame using the car's
+    own dead-reckoned motion and binned by bearing, so static objects line up and only
+    real movement is left. Speeds are trusted only on smooth surfaces (smooth_tol).
+    Call add() for every scan, then approach_speeds() for points of the newest one.
     """
 
     def __init__(self, baseline: float = 0.1, match_gate: float = 0.5,
@@ -135,6 +89,7 @@ class MotionTracker:
         Returns:
             np.ndarray: Approach speed of each point (m/s, >= 0; 0 if unknown).
         """
+        # need an old and a new scan, far enough apart in time
         speeds = np.zeros(px.size)
         if len(self.history) < 2 or px.size == 0:
             return speeds
@@ -161,6 +116,7 @@ class MotionTracker:
             speeds = np.clip(change / dt, 0.0, self.max_speed)
             unknown = (~np.isfinite(change) | (np.abs(change) > self.match_gate)
                        | ~(old_spread <= self.smooth_tol) | ~(new_spread <= self.smooth_tol))
+        # big jumps (edges) and rough surfaces give no trusted speed
         speeds[unknown] = 0.0
         return speeds
 
@@ -190,6 +146,7 @@ class MotionTracker:
         Returns:
             tuple[np.ndarray, np.ndarray]: (nearest, spread); spread is inf if a bin is empty.
         """
+        # each point's bin and its two neighbours (clamped at the ends)
         three = np.stack([binned[np.maximum(b - 1, 0)], binned[b],
                           binned[np.minimum(b + 1, self.num_bins - 1)]])
         with np.errstate(invalid='ignore'):
@@ -208,12 +165,18 @@ class MotionTracker:
         Returns:
             np.ndarray: Bin index of each point.
         """
+        # bearing shifted to 0..2 pi, then divided into bin_width bins
         b = np.round((np.arctan2(y, x) + math.pi) / self.bin_width).astype(int)
         return np.clip(b, 0, self.num_bins - 1)
 
 
 class ScanSource:
-    """The latest scan from one topic, prepared for the safety checks."""
+    """
+    The latest scan from one topic, prepared for the safety checks.
+
+    A plain state holder filled in by SafetyNode.scan_callback(): ranges, angles and
+    points of the scan, its timing, and its obstacle-speed tracking state.
+    """
 
     def __init__(self, name: str, persist_scans: int = 4) -> None:
         """
@@ -239,7 +202,14 @@ class ScanSource:
 
 
 class SafetyNode(Node):
-    """Control speed, apply path-aware Automatic Emergency Braking, watch for stale inputs."""
+    """
+    Control speed, apply path-aware Automatic Emergency Braking, watch for stale inputs.
+
+    Subscribes to fused_scan (raw scan as fallback), ego_racecar/odom and drive_request
+    (steering + speed; negative speed = latched stop). Publishes the final command on
+    drive, the mode and last check on safety/state, and JSON decisions on safety/debug
+    while subscribed. Modes: normal, slow, stale, aeb and stopped (latched).
+    """
 
     # Extra time added to the time the car needs to stop (seconds).
     TTC_MARGIN = 0.1
@@ -278,6 +248,7 @@ class SafetyNode(Node):
         self.declare_parameter('scan_timeout', 0.15)    # fused scan older: use raw /scan (s)
         self.declare_parameter('odom_timeout', 0.5)     # odometry older: use commanded speed (s)
 
+        # read the parameters once, clamped to sensible ranges
         p = self.get_parameter
         self.TTC_MARGIN = max(0.0, float(p('ttc_margin').value))
         self.drive_speed = float(p('drive_speed').value)
@@ -347,6 +318,7 @@ class SafetyNode(Node):
         """
         self.current_speed = abs(msg.twist.twist.linear.x)
         self.last_odom_time = self.get_clock().now()
+        # yaw rate from the commanded steering, then move the dead-reckoned pose on
         self.current_yaw_rate = self.yaw_rate()
         self.advance_pose(self.current_speed, self.current_yaw_rate,
                           self.msg_time(msg.header.stamp))
@@ -389,6 +361,7 @@ class SafetyNode(Node):
         """
         now = self.get_clock().now().nanoseconds * 1e-9
         t = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        # unstamped, or from another clock: fall back to the node clock
         if t <= 0.0 or abs(t - now) > 1.0:
             return now
         return t
@@ -405,6 +378,7 @@ class SafetyNode(Node):
         if self.pose_time is not None and t < self.pose_time - 1.0:
             self.pose_history.clear()                 # clock jumped back (bag or sim restart)
             self.pose_time = None
+        # integrate the motion since the last update (gaps capped at 0.1 s)
         if self.pose_time is not None:
             dt = min(max(t - self.pose_time, 0.0), 0.1)
             ahead, left, turn = car_motion(speed, yaw_rate, dt)
@@ -430,15 +404,18 @@ class SafetyNode(Node):
         if not self.pose_history:
             return self.pose
         newest = self.pose_history[-1]
+        # after the newest update: extrapolate at the current speed and yaw rate
         if t >= newest[0]:
             dt = min(t - newest[0], 0.2)
             ahead, left, turn = car_motion(self.current_speed, self.current_yaw_rate, dt)
             _, x, y, yaw = newest
             c, s = math.cos(yaw), math.sin(yaw)
             return (x + c * ahead - s * left, y + s * ahead + c * left, yaw + turn)
+        # before the oldest update: the oldest pose is the best guess
         oldest = self.pose_history[0]
         if t <= oldest[0]:
             return oldest[1:]
+        # otherwise interpolate linearly between the two updates around t
         for before, after in zip(reversed(list(self.pose_history)[:-1]),
                                  reversed(list(self.pose_history)[1:])):
             if before[0] <= t <= after[0]:
@@ -448,11 +425,21 @@ class SafetyNode(Node):
         return newest[1:]
 
     def fused_scan_callback(self, msg: LaserScan) -> None:
-        """Store and check a fused scan."""
+        """
+        Store and check a fused scan.
+
+        Args:
+            msg (LaserScan): Scan from fusion_node.
+        """
         self.scan_callback(msg, 'fused')
 
     def raw_scan_callback(self, msg: LaserScan) -> None:
-        """Store and check a raw LiDAR scan."""
+        """
+        Store and check a raw LiDAR scan (used only while the fused scan is stale).
+
+        Args:
+            msg (LaserScan): Raw scan from the LiDAR.
+        """
         self.scan_callback(msg, 'raw')
 
     def scan_callback(self, msg: LaserScan, name: str) -> None:
@@ -469,6 +456,7 @@ class SafetyNode(Node):
             now_s = now.nanoseconds * 1e-9
             taken = self.msg_time(msg.header.stamp)        # when the scan was taken
 
+            # invalid readings become inf; each beam also stored as an (x, y) point
             ranges = np.array(msg.ranges, dtype=np.float64)
             with np.errstate(invalid='ignore'):
                 bad = ~np.isfinite(ranges) | (ranges < msg.range_min) | (ranges > msg.range_max)
@@ -516,11 +504,13 @@ class SafetyNode(Node):
         if now_s - source.tracked_at > 0.2:
             source.obstacle_history.clear()              # this source was not in use: restart
         source.tracked_at = now_s
+        # beams ahead within TRACK_RANGE and TRACK_FOV get an agreed obstacle speed
         ranges, angles = source.ranges, source.angles
         ahead = np.nonzero(np.isfinite(ranges) & (source.x > 0.0) & (ranges <= self.TRACK_RANGE)
                            & (np.abs(angles) <= self.TRACK_FOV))[0]
         source.agreed = np.zeros(ranges.size)
         source.agreed[ahead] = self.agreed_speeds(source, ahead)
+        # the cap is the smallest of the recent per-scan maxima, once enough scans are in
         source.obstacle_history.append(float(np.max(source.agreed, initial=0.0)))
         full = len(source.obstacle_history) == source.obstacle_history.maxlen
         source.obstacle_cap = min(source.obstacle_history) if full else 0.0
@@ -633,6 +623,7 @@ class SafetyNode(Node):
             return np.zeros(index.size)
         own = source.tracker.approach_speeds(source.x[index], source.y[index])
         own[~self.facing(source)[index]] = 0.0           # barriers seen at a shallow angle
+        # 5-beam median: a glitch on one or two beams cannot set a speed
         padded = np.pad(own, 2, mode='edge')
         agreed = np.median(np.stack([padded[k:k + own.size] for k in range(5)]), axis=0)
         agreed = np.clip(agreed, 0.0, self.MAX_OBSTACLE_SPEED)
@@ -664,6 +655,7 @@ class SafetyNode(Node):
         out = np.zeros(ranges.size, dtype=bool)
         if ranges.size < 3:
             return out
+        # compare the ranges k beams either side; a steep change means a grazing surface
         step = abs(float(source.angles[1] - source.angles[0]))
         k = max(1, int(round(self.FACING_SPAN / step))) if step > 0.0 else 1
         if ranges.size <= 2 * k:
@@ -716,6 +708,7 @@ class SafetyNode(Node):
         if self.safety_mode == 'stale':
             self.set_mode('normal')                     # inputs fresh again: resume
 
+        # requested speed, never above drive_speed (0 means drive_speed)
         speed = self.drive_speed
         if msg.drive.speed > 0.0:
             speed = min(self.drive_speed, msg.drive.speed)
@@ -761,14 +754,14 @@ class SafetyNode(Node):
                 and self.active_source() is not None)
 
     def watchdog_callback(self) -> None:
-        """Command zero speed whenever an input is stale, and publish the safety state."""
+        """Run check_inputs() every WATCHDOG_PERIOD, braking if it raises."""
         try:
             self.check_inputs()
         except Exception as exc:
             self.fail_safe('watchdog', exc)
 
     def check_inputs(self) -> None:
-        """Brake while an input is stale (shown on /safety/state; it resumes, so not logged)."""
+        """Publish the safety state and brake while an input is stale (not logged; it resumes)."""
         self.publish_state()
         if self.inputs_fresh():
             return
@@ -780,7 +773,12 @@ class SafetyNode(Node):
     # Outputs
 
     def is_latched(self) -> bool:
-        """Return True once the lap counter's stop request has stopped the car for good."""
+        """
+        Check whether the car is stopped for good.
+
+        Returns:
+            bool: True once the lap counter's stop request has latched the stop.
+        """
         return self.safety_mode == 'stopped'
 
     def set_mode(self, mode: str) -> None:
@@ -825,6 +823,7 @@ class SafetyNode(Node):
         Not latched: the next drive request that finds the TTC back above the threshold
         lets the car drive on.
         """
+        # log only on the transition into AEB, then brake on every call
         if self.safety_mode != 'aeb':
             nearest, _, ttc, needed, obstacle = self.last_check
             moving = f'approaching at {obstacle:.1f} m/s' if obstacle > 0.0 else 'static'
@@ -889,7 +888,7 @@ class SafetyNode(Node):
         self.last_command_speed = float(speed)
 
     def emergency_brake(self) -> None:
-        """Command zero speed while preserving steering."""
+        """Command zero speed on /drive while keeping the latest steering angle."""
         self.publish_drive_command(0.0, self.latest_steering_angle)
 
     def stop_on_exit(self, repeats: int = 5, period: float = 0.02) -> None:
@@ -923,6 +922,7 @@ def init_ros(args=None) -> None:
     Args:
         args: Arguments for rclpy.init, or None for the process arguments.
     """
+    # SignalHandlerOptions exists from Humble on; older rclpy falls back to a plain init
     try:
         from rclpy.signals import SignalHandlerOptions
     except ImportError:
@@ -932,7 +932,12 @@ def init_ros(args=None) -> None:
 
 
 def main(args=None) -> None:
-    """Run the safety node; on Ctrl+C (or any exit), stop the car, then end."""
+    """
+    Run the safety node; on Ctrl+C (or any exit), stop the car, then end.
+
+    Args:
+        args: Command-line arguments passed to rclpy.init (None = sys.argv).
+    """
     init_ros(args)                 # initialize ROS 2
     safety_node = SafetyNode()     # create instance of SafetyNode
     try:

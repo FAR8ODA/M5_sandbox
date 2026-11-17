@@ -1,9 +1,4 @@
-"""
-Check what each node really gets from launch/milestone4_py.py, without ROS.
-
-The launch and launch_ros modules are replaced by small stand-ins, so launch_nodes() can
-be run with a fake context and the Node(...) calls inspected.
-"""
+"""Check what each node gets from launch/milestone4_py.py, with launch stubbed out."""
 
 import importlib.util
 import os
@@ -22,6 +17,7 @@ class Recorded:
     """Stands in for every launch action: keeps its arguments."""
 
     def __init__(self, *args, **kwargs) -> None:
+        """Keep the positional and keyword arguments for inspection."""
         self.args, self.kwargs = args, kwargs
 
 
@@ -29,14 +25,17 @@ class LaunchConfiguration:
     """launch.substitutions.LaunchConfiguration that reads the fake context."""
 
     def __init__(self, name: str) -> None:
+        """Store the launch argument name."""
         self.name = name
 
     def perform(self, context) -> str:
+        """Return the argument's value from the fake context."""
         return context.launch_configurations[self.name]
 
 
 def load_launch_module():
     """Import the launch file with launch and launch_ros replaced by stand-ins."""
+    # fake modules exposing only the names the launch file imports
     stubs = {}
     for name, attrs in {
         'launch': {'LaunchContext': object, 'LaunchDescription': Recorded},
@@ -51,6 +50,7 @@ def load_launch_module():
     }.items():
         stubs[name] = types.ModuleType(name)
         stubs[name].__dict__.update(attrs)
+    # import the launch file by path while the stubs are installed
     with patch.dict(sys.modules, stubs):
         spec = importlib.util.spec_from_file_location('milestone4_launch', LAUNCH_FILE)
         module = importlib.util.module_from_spec(spec)
@@ -66,6 +66,7 @@ class TestLaunchParameters(unittest.TestCase):
 
     def nodes(self, **arguments) -> dict:
         """Run launch_nodes with these command-line arguments; return {node: parameters}."""
+        # every launch argument at its default, then the given overrides
         config = {'params_file': PARAMS_FILE, 'use_camera': 'true', 'use_depth': 'false',
                   'start_camera': 'false', 'odom_topic': '/odom'}
         config.update({name: '' for name, _, _ in LAUNCH.TUNING_ARGS})
@@ -82,11 +83,13 @@ class TestLaunchParameters(unittest.TestCase):
         return found
 
     def test_max_speed_sets_the_safety_cap_too(self):
+        """Check max_speed sets the planner's speed and the safety cap."""
         nodes = self.nodes(max_speed='1.4')
         self.assertEqual(nodes['gap_follow_node']['max_speed'], 1.4)
         self.assertEqual(nodes['safety_node']['drive_speed'], 1.4)
 
     def test_file_values_without_arguments(self):
+        """Check the YAML values (own and shared sections) apply with no arguments."""
         nodes = self.nodes()
         self.assertEqual(nodes['gap_follow_node']['max_speed'], 1.0)
         self.assertEqual(nodes['safety_node']['drive_speed'], 1.0)
@@ -95,6 +98,7 @@ class TestLaunchParameters(unittest.TestCase):
             self.assertEqual(nodes[node]['wheelbase'], 0.33)
 
     def test_arguments_in_any_section_win(self):
+        """Check command-line arguments override shared and own YAML sections."""
         nodes = self.nodes(a_brake='2.5', num_laps='2', pass_speed='0.6', cam_x='0.05',
                            track_obstacles='true')
         self.assertEqual(nodes['gap_follow_node']['a_brake'], 2.5)   # shared section
@@ -105,6 +109,7 @@ class TestLaunchParameters(unittest.TestCase):
         self.assertIs(nodes['safety_node']['track_obstacles'], True)
 
     def test_sensor_switches(self):
+        """Check use_camera:=false drops the camera node and reaches the others."""
         nodes = self.nodes(use_camera='false')
         self.assertNotIn('camera_scan_node', nodes)
         self.assertIs(nodes['fusion_node']['use_camera'], False)

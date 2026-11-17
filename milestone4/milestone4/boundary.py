@@ -1,17 +1,9 @@
 """
-Colour mask -> LaserScan-style ranges.
+Colour mask -> LaserScan-style ranges (no ROS code).
 
-For each image column, find the lowest masked pixel below the horizon. This shows where
-the nearest object meets the floor. The pixel's row determines the distance, while its column
-determines the bearing. Grouping these measurements by bearing produces LiDAR-like ranges.
-
-Milestone 4 changes:
-    mask_scan() builds a scan from any mask, so the same code makes /camera_scan
-    (walls and boxes) and /camera_box_scan (boxes only).
-    _first_hit_rows() and _bin_points() are vectorised with NumPy instead of looping
-    over every column in Python, which matters on the Jetson at 30 frames per second.
-    A box must stand on the floor (not_below): tan furniture seen above the black ducting
-    is not a box.
+The lowest masked pixel in each image column is where the nearest object meets the
+floor: its row gives the distance and its column the bearing. Use mask_scan() for any
+mask, or colour_scan() to mask and scan a BGR image in one call.
 """
 
 from __future__ import annotations
@@ -78,6 +70,7 @@ def mask_scan(mask: np.ndarray, cam: CameraModel, num_beams: int, range_max: flo
 
     # finds the closest masked pixel in each image column
     hit_rows = _first_hit_rows(mask, cam.horizon_row(), ignore_bottom_rows)
+    # drop columns whose object sits on a not_below pixel (e.g. furniture on the ducting)
     if not_below is not None and contact_rows > 0:
         hit_rows[_standing_on(hit_rows, not_below, contact_rows, ignore_bottom_rows)] = -1
 
@@ -132,10 +125,12 @@ def _standing_on(hit_rows: np.ndarray, below: np.ndarray, contact_rows: int,
     """
     height = below.shape[0]
     last = height - max(0, ignore_bottom_rows) - 1          # lowest row that is not the car
+    # one row of contact_rows candidate rows under each column's hit
     rows = hit_rows[:, None] + np.arange(1, contact_rows + 1)[None, :]
+    # only check columns that have a hit, and rows above the car body
     inside = (hit_rows[:, None] >= 0) & (rows <= last)
     cols = np.broadcast_to(np.arange(hit_rows.size)[:, None], rows.shape)
-    values = below[np.clip(rows, 0, height - 1), cols] > 0
+    values = below[np.clip(rows, 0, height - 1), cols] > 0   # clip keeps indices in the image
     return np.any(values & inside, axis=1)
 
 
@@ -164,8 +159,8 @@ def _first_hit_rows(mask: np.ndarray, horizon_row: float,
     if row_top >= row_bot:
         return hits
 
-    band = mask[row_top:row_bot] > 0
-    found = band.any(axis=0)
+    band = mask[row_top:row_bot] > 0                    # usable rows only
+    found = band.any(axis=0)                            # columns with at least one hit
     lowest = band.shape[0] - 1 - np.argmax(band[::-1], axis=0)   # last True row of each column
     hits[found] = row_top + lowest[found]
     return hits

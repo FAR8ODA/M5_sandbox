@@ -1,25 +1,9 @@
 """
 Depth image -> obstacle distances per bearing (no ROS code).
 
-Only a horizontal band of the depth image is used. It is split into vertical strips,
-one per beam, and each strip reports a low percentile of its distances so noise does
-not throw it off (Milestone 3).
-
-Milestone 4 change: floor rejection. Every depth pixel is turned into a 3D point using
-the camera intrinsics, mounting height and pitch (the same geometry as
-camera_model.ground_points). Pixels whose height above the floor is outside
-[min_height, max_height] are dropped before the percentile, so the floor never shows up
-as an obstacle. That lets the band reach lower in the image and catch low obstacles
-that pass under the LiDAR's scan plane.
-
-The rejection is only as good as mount_height and pitch_deg: a 1 degree pitch error moves
-the floor about 1.7 cm per metre of depth. min_height (5 cm) and range_max (2.5 m) keep
-that error below the threshold; check on the car that an empty floor gives an empty
-/depth_scan (README tuning checklist).
-
-The D435i depth works from about 0.3 m to 3 m (Vision intro, slide 4), and the matte
-black ducting absorbs its infrared light, so depth is used for boxes and low obstacles
-only; the LiDAR covers the walls.
+depth_ranges() splits a horizontal band of the image into one strip per beam and
+reports a low percentile of each strip. Pixels outside [min_height, max_height]
+above the floor are rejected, so the floor never appears as an obstacle.
 """
 
 from dataclasses import dataclass
@@ -105,6 +89,7 @@ def depth_ranges(depth_m: np.ndarray, fx: float, cx: float, cy: float, prm: Dept
     distances = np.full(beam_count, prm.range_max, dtype=np.float32)
     angles = np.zeros(beam_count, dtype=np.float64)
 
+    # pixels with a valid reading inside the range limits and at obstacle height
     with np.errstate(invalid='ignore'):
         usable = np.isfinite(band) & (band > prm.range_min) & (band < prm.range_max) & keep
 
@@ -118,6 +103,7 @@ def depth_ranges(depth_m: np.ndarray, fx: float, cx: float, cy: float, prm: Dept
         angle = math.atan((cx - middle) / fx)
         angles[beam] = angle
 
+        # skip strips with too few valid pixels (left at range_max)
         section = usable[:, left:right]
         if section.size == 0 or section.mean() < prm.min_valid_frac:
             continue
@@ -151,9 +137,11 @@ def _forward_and_keep(band: np.ndarray, row_start: int, cy: float, fy: Optional[
     Returns:
         Tuple[np.ndarray, np.ndarray]: (forward, keep), both the shape of band.
     """
+    # floor rejection off: depth is the forward distance and every pixel is kept
     if not prm.floor_reject or fy is None or fy <= 0:
         return band, np.ones(band.shape, dtype=bool)
 
+    # normalised row coordinate of each band row, broadcast across columns
     rows = np.arange(row_start, row_start + band.shape[0], dtype=np.float64)
     yn = ((rows - cy) / fy)[:, None]
     p = math.radians(prm.pitch_deg)

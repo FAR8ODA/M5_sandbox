@@ -1,21 +1,10 @@
-"""Camera geometry: pinhole intrinsics plus mounting height and pitch.
+"""
+Camera geometry: pinhole intrinsics plus mounting height and pitch (no ROS code).
 
-The colour scan relies on one assumption: the car sits on a flat floor. The
-pixel where an object meets the floor then has a known distance, found by
-intersecting that pixel's viewing ray with the floor plane.
-
-The pinhole model and the intrinsics (fx, fy, cx, cy) are not covered in the
-Vision intro slides; they follow the standard camera model in the OpenCV
-documentation (https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html). The
-intrinsics come from the RealSense driver's camera_info topic (slide 7: camera
-node and topics).
-
-Frames and conventions
-----------------------
-Camera optical frame: x right, y down, z forward.
-Vehicle frame used for the scan: forward, and lateral (positive = right).
-Bearing = atan2(-lateral, forward), so left is positive, as in ROS LaserScan.
-Pitch is positive when the camera is tilted down.
+ground_points() maps pixels to floor points (flat-floor assumption); image_points()
+maps known 3D points back to pixels. Frames: camera x right, y down, z forward;
+vehicle forward and lateral (positive = right); bearing left-positive; pitch
+positive when tilted down.
 """
 
 from dataclasses import dataclass

@@ -16,15 +16,18 @@ class GapFollowTest(unittest.TestCase):
     """Disparity extension, target choice, cornering check, speed and scan fallback."""
 
     def setUp(self):
+        """Reset the clock and overrides; build a node and the LiDAR beam angles."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
         self.node = GapFollowNode()
         self.angles = ros_stubs.lidar_angles()
 
     def requests(self):
+        """Return every drive request the node has published."""
         return self.node.publishers_by_topic['drive_request'].messages
 
     def test_disparity_is_extended_by_half_width_plus_margin(self):
+        """Check a disparity is extended by exactly half the car plus the margin."""
         ranges = np.full(200, 4.0)
         ranges[100:120] = 1.0                                 # a box 1 m away
         extended = self.node.extend_disparities(ranges, np.zeros(200, bool), 0.01)
@@ -39,6 +42,7 @@ class GapFollowTest(unittest.TestCase):
         # black barriers often give no return right at their edge: 3 invalid beams between
         # the barrier (1 m) and the open track (4 m). Comparing only adjacent beams found no
         # disparity there and extended nothing.
+        """Check invalid beams at a barrier edge do not hide the disparity."""
         inc = math.radians(0.25)
         count = math.ceil(math.atan2(0.15 + 0.20, 1.0) / inc)
         for far_side_up in (True, False):
@@ -51,6 +55,7 @@ class GapFollowTest(unittest.TestCase):
             self.assertTrue(np.all(extended[ranges == 0.0] == 0.0))   # still invalid
 
     def test_confirmed_box_gets_the_wider_margin(self):
+        """Check a camera-confirmed box is extended by box_margin."""
         ranges = np.full(200, 4.0)
         ranges[100:120] = 1.0
         boxes = np.zeros(200, bool)
@@ -65,6 +70,7 @@ class GapFollowTest(unittest.TestCase):
         # a box seen from the side: its side face runs from the disparity (1.2 m, beam 100)
         # to the near corner (0.8 m, beam 104), then the front face. The margin is 0.35 m at
         # the near corner too, which needs more beams than at the far edge of the side face
+        """Check the extension covers the margin at a box's near corner."""
         ranges = np.full(200, 4.0)
         ranges[100:105] = np.linspace(1.2, 0.8, 5)
         ranges[105:140] = 0.8
@@ -77,13 +83,22 @@ class GapFollowTest(unittest.TestCase):
         self.assertEqual(extended[at_corner - 1], 4.0)
 
     def test_invalid_beams_are_not_disparities(self):
+        """Check a single invalid beam does not create a disparity."""
         ranges = np.full(200, 4.0)
         ranges[50] = 0.0                                      # one invalid reading
         extended = self.node.extend_disparities(ranges, np.zeros(200, bool), 0.01)
         self.assertEqual(int((extended == 4.0).sum()), 199)
 
     def drive_corridor(self, seconds):
-        """Feed a straight corridor for some seconds at 40 Hz; return the requests."""
+        """
+        Feed a straight corridor for some seconds at 40 Hz.
+
+        Args:
+            seconds (float): How long to drive (s).
+
+        Returns:
+            list: The drive part of every request published.
+        """
         scan = ros_stubs.make_scan(ros_stubs.corridor_ranges(0.6))
         for i in range(int(seconds / 0.025)):
             ros_stubs.CLOCK.seconds = i * 0.025
@@ -91,17 +106,20 @@ class GapFollowTest(unittest.TestCase):
         return [m.drive for m in self.requests()]
 
     def test_straight_corridor_drives_straight_at_full_speed(self):
+        """Check a straight corridor gives straight steering at max_speed."""
         requests = self.drive_corridor(1.5)
         self.assertLess(abs(requests[-1].steering_angle), 0.02)
         self.assertAlmostEqual(requests[-1].speed, 1.0, places=3)        # max_speed
 
     def test_speed_ramps_up_at_a_accel(self):
+        """Check the requested speed rises by at most a_accel per second."""
         speeds = [r.speed for r in self.drive_corridor(1.0)]
         rises = np.diff([0.0] + speeds)
         self.assertLessEqual(float(rises.max()), 2.0 * 0.025 + 1e-9)   # a_accel x dt
         self.assertAlmostEqual(speeds[int(0.5 / 0.025) - 1], 1.0, places=2)  # 1 m/s after 0.5 s
 
     def test_target_avoids_a_box_on_the_right(self):
+        """Check the target and steering go left of a box on the right."""
         ranges = ros_stubs.add_box(ros_stubs.corridor_ranges(0.6), 1.5, -0.3, 0.1)
         r, a = self.node.preprocess_scan(ros_stubs.make_scan(ranges))
         extended = self.node.extend_disparities(r, np.zeros(r.size, bool), a[1] - a[0])
@@ -114,6 +132,7 @@ class GapFollowTest(unittest.TestCase):
         self.assertGreater(self.requests()[-1].drive.steering_angle, 0.0)   # steers left
 
     def test_corner_check_blocks_a_turn_into_the_side(self):
+        """Check corner_check cancels a turn towards something beside the car."""
         r = np.full(self.angles.size, 3.0)
         r[np.abs(self.angles - math.radians(100.0)) < math.radians(2.0)] = 0.15  # left side
         self.assertEqual(self.node.corner_check(r, self.angles, 0.3), 0.0)
@@ -125,6 +144,7 @@ class GapFollowTest(unittest.TestCase):
         # car on the left (nearer than side_clear + 0.15 m), corner_check may cancel the turn
         # on the next scan, so the speed must already suit the straight path into the wall.
         # (It was the turn's speed, and AEB fired the moment the turn was cancelled.)
+        """Check the speed suits the straight path when the turn may be cancelled."""
         ranges = np.where(self.angles > math.radians(12.0), 4.0, 1.0)
         beside = np.abs(self.angles - math.radians(100.0)) < math.radians(2.0)
         speeds = []
@@ -142,17 +162,20 @@ class GapFollowTest(unittest.TestCase):
         self.assertAlmostEqual(speeds[1], self.node.braking_limit(wall), places=2)
 
     def test_corner_check_ignores_the_car_itself(self):
+        """Check readings of the car's own body are ignored by corner_check."""
         r = np.full(self.angles.size, 3.0)
         r[np.abs(self.angles - math.radians(100.0)) < math.radians(2.0)] = 0.05   # own body
         r[np.abs(self.angles - math.radians(130.0)) < math.radians(2.0)] = 0.15   # behind
         self.assertEqual(self.node.corner_check(r, self.angles, 0.3), 0.3)
 
     def test_clear_straight_gives_max_speed(self):
+        """Check a clear straight path gives max_speed."""
         self.assertAlmostEqual(self.node.calculate_speed(math.inf, 0.0, False), 1.0)
         self.assertAlmostEqual(self.node.calculate_speed(20.0, 0.0, False), 1.0)
 
     def test_braking_limit(self):
         # keep plan_factor (2.5) x the TTC needed to stop for whatever is 1 m along the path
+        """Check the braking limit keeps plan_factor x the needed TTC."""
         expected = float(slow_speed_cap(1.0 - 0.25, 0.0, 2.5, 0.15, 2.0, 0.1))
         self.assertAlmostEqual(self.node.calculate_speed(1.0, 0.0, False), expected)
         self.assertLess(expected, 0.75)                        # about 0.70 m/s for 1 m
@@ -160,11 +183,13 @@ class GapFollowTest(unittest.TestCase):
 
     def test_braking_limit_below_min_speed_wins(self):
         # min_speed keeps the car moving, but never faster than it can stop
+        """Check a braking limit below min_speed is not lifted."""
         brake = self.node.braking_limit(0.4)
         self.assertLess(brake, self.node.MIN_SPEED)
         self.assertAlmostEqual(self.node.calculate_speed(0.4, 0.0, False), brake)
 
     def test_cornering_limit(self):
+        """Check the cornering limit sqrt(a_lat / curvature) and when it applies."""
         curvature = math.tan(0.4) / 0.33
         limit = math.sqrt(2.5 / curvature)                               # about 1.4 m/s
         self.assertAlmostEqual(self.node.cornering_limit(0.4), limit)
@@ -179,11 +204,13 @@ class GapFollowTest(unittest.TestCase):
         self.assertAlmostEqual(fast.calculate_speed(math.inf, 0.1, False), 2.0)  # gentle
 
     def test_box_pass_cap(self):
+        """Check passing a box caps the speed at pass_speed."""
         self.assertAlmostEqual(self.node.calculate_speed(math.inf, 0.0, True), 0.8)
 
     def test_planner_never_asks_more_than_safety_allows(self):
         # same scans, same braking model: the planner's request is inside the safety band,
         # so the safety node should not have to cut it
+        """Check the planner's request is never above the safety node's cap."""
         for x in (0.8, 1.2, 2.0, 3.0, 5.0):
             ranges = ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), x, -0.2, 0.2)
             scan = ros_stubs.make_scan(ranges)
@@ -197,6 +224,7 @@ class GapFollowTest(unittest.TestCase):
 
     def test_steering_is_smoothed(self):
         # MS3 drove this track with 0.7 on the previous command; 0.3 twitched on the car
+        """Check the steering is pure pursuit blended with the previous command."""
         self.assertAlmostEqual(self.node.SMOOTHING, 0.6)
         # pure pursuit from the rear axle, 0.27 m behind the LiDAR; lookahead at its 0.5 m minimum
         gx, gy = 0.5 * math.cos(0.1) + 0.27, 0.5 * math.sin(0.1)
@@ -208,6 +236,7 @@ class GapFollowTest(unittest.TestCase):
 
     def test_pure_pursuit_from_the_rear_axle(self):
         # treating the LiDAR as the rear axle (lidar_x 0, the old formula) turns harder
+        """Check pure pursuit from the rear axle turns less than from the LiDAR."""
         self.node.SMOOTHING = 0.0
         axle = self.node.calculate_steering_angle(0.3, 5.0)
         self.node.LIDAR_X = 0.0
@@ -218,6 +247,7 @@ class GapFollowTest(unittest.TestCase):
 
     def test_lookahead_follows_the_measured_speed(self):
         # asking to slow down must not shorten the lookahead before the car has slowed
+        """Check the lookahead uses the measured, not the requested, speed."""
         self.node.odom_callback(ros_stubs.make_odom(1.5))
         self.node.previous_speed = 0.3
         fast = self.node.calculate_steering_angle(0.3, 5.0)
@@ -226,6 +256,7 @@ class GapFollowTest(unittest.TestCase):
         self.assertAlmostEqual(fast, self.node.calculate_steering_angle(0.3, 5.0))
 
     def test_box_ahead_uses_camera_labels(self):
+        """Check box_ahead() needs camera box labels."""
         ranges = ros_stubs.add_box(ros_stubs.corridor_ranges(0.6), 1.0, -0.2, 0.2)
         r, a = self.node.preprocess_scan(ros_stubs.make_scan(ranges))
         boxes = np.zeros(r.size, bool)
@@ -234,6 +265,7 @@ class GapFollowTest(unittest.TestCase):
         self.assertTrue(self.node.box_ahead(r, a, boxes))
 
     def test_raw_scan_used_only_when_fused_is_stale(self):
+        """Check the raw scan drives only while the fused scan is stale."""
         scan = ros_stubs.make_scan(ros_stubs.corridor_ranges(0.6))
         self.node.fused_callback(scan)
         ros_stubs.CLOCK.seconds = 0.05
@@ -245,6 +277,7 @@ class GapFollowTest(unittest.TestCase):
         self.assertEqual(len(self.requests()), 2)             # fused stale: drive on raw
 
     def test_no_gap_publishes_nothing(self):
+        """Check no request is published when there is no gap."""
         self.node.fused_callback(ros_stubs.make_scan(np.full(ros_stubs.LIDAR_BEAMS, 0.2)))
         self.assertEqual(len(self.requests()), 0)
 
@@ -257,6 +290,7 @@ class BoxLabelDebounceTest(unittest.TestCase):
     """Flickering camera box labels must not toggle the box margin or the passing speed."""
 
     def setUp(self):
+        """Build a node and labelled / empty /obstacle_scan ranges."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
         self.node = GapFollowNode()
@@ -265,16 +299,28 @@ class BoxLabelDebounceTest(unittest.TestCase):
         self.empty = np.full(ros_stubs.LIDAR_BEAMS, np.inf)
 
     def label(self, t, on):
+        """
+        Feed one /obstacle_scan at time t.
+
+        Args:
+            t (float): Time (s).
+            on (bool): True to label the box, False for no labels.
+
+        Returns:
+            bool: Whether the box's centre beam counts as a box afterwards.
+        """
         ros_stubs.CLOCK.seconds = t
         self.node.obstacle_callback(ros_stubs.make_scan(self.labelled if on else self.empty, t=t))
         return bool(self.node.box_beams(ros_stubs.LIDAR_BEAMS)[540])
 
     def test_one_label_in_three_is_not_a_box(self):
+        """Check one label in three scans is not a box."""
         self.label(0.000, False)
         self.label(0.025, False)
         self.assertFalse(self.label(0.050, True))
 
     def test_two_labels_in_three_are_a_box_held_for_box_hold(self):
+        """Check two labels in three make a box, held for box_hold."""
         self.label(0.000, False)
         self.label(0.025, True)
         self.assertTrue(self.label(0.050, True))
@@ -283,6 +329,7 @@ class BoxLabelDebounceTest(unittest.TestCase):
         self.assertFalse(self.label(0.400, False))             # ... for 0.3 s
 
     def test_passing_is_held_for_pass_hold(self):
+        """Check passing mode is held for pass_hold after the box."""
         r = np.full(ros_stubs.LIDAR_BEAMS, 3.0)
         a = ros_stubs.lidar_angles()
         boxes = np.zeros(r.size, bool)
@@ -296,6 +343,7 @@ class BoxLabelDebounceTest(unittest.TestCase):
 
     def test_flickering_labels_start_one_pass(self):
         # labels on in every other scan for a second, as in the car log
+        """Check labels flickering every other scan start only one pass."""
         scan = ros_stubs.make_scan(ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 1.2,
                                                      -0.2, 0.2))
         passing = []
@@ -312,6 +360,7 @@ class BoxLabelDebounceTest(unittest.TestCase):
     def test_debug_topic_says_where_the_box_is(self):
         # with no box on the track the car slowed for "boxes" all lap: gap_follow/debug must
         # say where (the box field while passing)
+        """Check box_where describes the nearest box ahead."""
         a = ros_stubs.lidar_angles()
         r = np.full(a.size, 3.0)
         boxes = (a > math.radians(30.0)) & (a < math.radians(40.0))
@@ -324,17 +373,20 @@ class DebugTopicTest(unittest.TestCase):
     """gap_follow/debug: one line of JSON per decision, only while someone listens."""
 
     def setUp(self):
+        """Build a node and keep its debug publisher."""
         ros_stubs.CLOCK.seconds = 0.0
         ros_stubs.PARAM_OVERRIDES.clear()
         self.node = GapFollowNode()
         self.debug = self.node.publishers_by_topic['gap_follow/debug']
 
     def test_nothing_is_published_without_a_subscriber(self):
+        """Check no debug line is built without a subscriber."""
         self.node.fused_callback(ros_stubs.make_scan(ros_stubs.corridor_ranges(1.0)))
         self.assertEqual(len(self.node.publishers_by_topic['drive_request'].messages), 1)
         self.assertEqual(self.debug.messages, [])
 
     def test_decision_matches_the_drive_request(self):
+        """Check the debug line matches the request and names the limit."""
         self.debug.subscribers = 1
         scan = ros_stubs.make_scan(ros_stubs.add_box(ros_stubs.corridor_ranges(1.0), 1.0,
                                                      -0.2, 0.2), t=2.5)
@@ -352,6 +404,7 @@ class DebugTopicTest(unittest.TestCase):
 
     def test_open_space_is_valid_json(self):
         # nothing on the path: the free distance is infinite, which JSON cannot write
+        """Check infinite values are written as null, keeping the JSON valid."""
         self.debug.subscribers = 1
         self.node.previous_speed = 1.0
         self.node.fused_callback(ros_stubs.make_scan(np.full(ros_stubs.LIDAR_BEAMS, np.inf)))
@@ -362,6 +415,7 @@ class DebugTopicTest(unittest.TestCase):
         self.assertEqual(line['limit'], 'max')
 
     def test_no_gap_is_reported(self):
+        """Check a no-gap decision is reported with gap false."""
         self.debug.subscribers = 1
         self.node.fused_callback(ros_stubs.make_scan(np.full(ros_stubs.LIDAR_BEAMS, 0.2)))
         self.assertEqual(self.node.publishers_by_topic['drive_request'].messages, [])

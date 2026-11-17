@@ -1,13 +1,8 @@
 """
-Debug overlay for the colour scan, viewed live with rqt_image_view.
+Debug overlay for the colour scan, viewed live with rqt_image_view (no ROS code).
 
-Drawn with OpenCV's drawing functions (cv2.line, cv2.circle, cv2.putText), as
-in the slides' cv2.circle mask example (slide 19).
-
-Red tint: pixels the mask marks as boundary/obstacle. Yellow line: the horizon
-(nothing above it is used). Green dots: the first boundary pixel per column,
-i.e. where the measured distances come from. Top-right inset: the resulting
-scan seen from above, car at the bottom centre, forward up.
+draw_debug() tints masked pixels red, draws the horizon (yellow), the boundary hits
+(green) and a top-down inset of the scan.
 """
 
 import math

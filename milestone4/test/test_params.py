@@ -1,9 +1,7 @@
 """
-Check config/milestone4.yaml against the parameters the nodes declare.
+Check config/milestone4.yaml against the parameters the nodes declare (no ROS).
 
-A misspelt name in the YAML file is silently ignored by ROS (the node keeps its code
-default), and a whole number written without a decimal point makes the node refuse to
-start. Both are caught here, without ROS.
+Catches misspelt names (silently ignored by ROS) and wrongly typed values.
 """
 
 import ast
@@ -32,6 +30,7 @@ def declared_parameters(node: str) -> dict:
     """
     with open(os.path.join(PACKAGE, 'milestone4', node + '.py'), encoding='utf-8') as f:
         tree = ast.parse(f.read())
+    # every self.declare_parameter(name, default) call with a literal name
     found = {}
     for call in ast.walk(tree):
         if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)

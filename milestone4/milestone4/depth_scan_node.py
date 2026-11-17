@@ -1,11 +1,4 @@
-"""ROS 2 node: depth image to a LaserScan of low obstacles and boxes on ``depth_scan``.
-
-Subscribes to the RealSense depth image and camera_info, runs depth.depth_ranges with
-floor rejection, and publishes a sensor_msgs/LaserScan. The fusion node adds these
-points to the LiDAR scan when they are nearer than anything the LiDAR sees and persist
-for a few frames. Depth is 16-bit millimetres (0 = no reading); cv_bridge passes the
-values through.
-"""
+"""ROS 2 node: depth image -> LaserScan of low obstacles and boxes (floor removed)."""
 
 from typing import Optional
 
@@ -21,8 +14,9 @@ from sensor_msgs.msg import CameraInfo, Image, LaserScan
 class DepthScanNode(Node):
     """Publish a LaserScan from the depth image, with the floor removed.
 
-    Subscribes to the depth image and camera_info. Publishes on ``depth_scan``.
-    Frames that arrive before camera_info are ignored.
+    Subscribes to depth_topic (16UC1 millimetres) and depth_info_topic. Publishes a
+    LaserScan on scan_topic (default ``depth_scan``) per frame, range_max meaning
+    nothing seen. Frames that arrive before camera_info are ignored.
     """
 
     def __init__(self) -> None:
@@ -146,7 +140,12 @@ class DepthScanNode(Node):
 
 
 def main(args=None) -> None:
-    """Run the depth scan node until interrupted."""
+    """
+    Run the depth scan node until interrupted (console entry point).
+
+    Args:
+        args: Command-line arguments passed to rclpy.init (None = sys.argv).
+    """
     rclpy.init(args=args)
     node = DepthScanNode()
     try:

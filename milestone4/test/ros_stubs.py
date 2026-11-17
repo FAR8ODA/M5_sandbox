@@ -1,14 +1,10 @@
 """
-Lightweight stand-ins for rclpy and the ROS message types, for the unit tests.
+Fake rclpy, ROS message and cv_bridge modules for the unit tests.
 
-Importing this module puts fake ``rclpy``, ``sensor_msgs``, ``nav_msgs``, ``std_msgs``,
-``ackermann_msgs`` and ``cv_bridge`` modules in ``sys.modules``, so the node classes can
-be created and their callbacks called directly, with a clock the test controls
-(``CLOCK.seconds``). No ROS installation or running graph is needed, so the tests run
-on a laptop as well as under ``colcon test``.
-
-If OpenCV is not installed, an empty ``cv2`` module is added too, so the node modules
-import; tests that really need OpenCV check ``HAVE_CV2`` and skip.
+Importing this module installs them in sys.modules, so nodes can be built and their
+callbacks called directly on a laptop, with a clock tests control (CLOCK.seconds).
+cv2 is faked too if missing; tests needing it check HAVE_CV2. Also provides scan,
+request, odometry and simulated-world helpers.
 """
 
 import importlib.util
@@ -31,6 +27,13 @@ class Stamp:
     """builtin_interfaces/Time."""
 
     def __init__(self, sec: int = 0, nanosec: int = 0) -> None:
+        """
+        Store the time.
+
+        Args:
+            sec (int): Whole seconds.
+            nanosec (int): Remaining nanoseconds.
+        """
         self.sec = sec
         self.nanosec = nanosec
 
@@ -39,6 +42,12 @@ class Duration:
     """rclpy.duration.Duration (nanoseconds only)."""
 
     def __init__(self, nanoseconds: int) -> None:
+        """
+        Store the length.
+
+        Args:
+            nanoseconds (int): Duration in nanoseconds.
+        """
         self.nanoseconds = nanoseconds
 
 
@@ -46,17 +55,27 @@ class Time:
     """rclpy.time.Time (nanoseconds only)."""
 
     def __init__(self, seconds: float = 0.0, nanoseconds: int = 0) -> None:
+        """
+        Store the time as nanoseconds.
+
+        Args:
+            seconds (float): Seconds part.
+            nanoseconds (int): Extra nanoseconds added to it.
+        """
         self.nanoseconds = int(round(seconds * 1e9)) + int(nanoseconds)
 
     def __sub__(self, other: 'Time') -> Duration:
+        """Return the Duration between this time and another."""
         return Duration(self.nanoseconds - other.nanoseconds)
 
     def to_msg(self) -> Stamp:
+        """Return this time as a header Stamp."""
         sec = self.nanoseconds // 1_000_000_000
         return Stamp(sec=sec, nanosec=self.nanoseconds - sec * 1_000_000_000)
 
     @classmethod
     def from_msg(cls, msg: Stamp) -> 'Time':
+        """Build a Time from a header Stamp."""
         return cls(nanoseconds=msg.sec * 1_000_000_000 + msg.nanosec)
 
 
@@ -64,9 +83,11 @@ class FakeClock:
     """Clock shared by every fake node; tests set ``CLOCK.seconds``."""
 
     def __init__(self) -> None:
+        """Start the clock at 0 s."""
         self.seconds = 0.0
 
     def now(self) -> Time:
+        """Return the current fake time."""
         return Time(seconds=self.seconds)
 
 
@@ -84,6 +105,7 @@ class Parameter:
     """rclpy Parameter (value only)."""
 
     def __init__(self, value) -> None:
+        """Store the value."""
         self.value = value
 
 
@@ -97,10 +119,22 @@ class Logger:
     """
 
     def __init__(self) -> None:
+        """Start with no records and no known call sites."""
         self.records = []
         self.call_sites = {}
 
     def _log(self, level: str, message: str, kwargs: dict) -> None:
+        """
+        Record a message, enforcing one severity and filter set per call site.
+
+        Args:
+            level (str): Severity name.
+            message (str): Log text.
+            kwargs (dict): Logging filters passed by the caller.
+
+        Raises:
+            ValueError: If the call site changed its severity or filters.
+        """
         caller = sys._getframe(2)
         site = (caller.f_code.co_filename, caller.f_lineno, caller.f_lasti)
         filters = frozenset(k for k in kwargs if k in ('throttle_duration_sec', 'once',
@@ -114,18 +148,23 @@ class Logger:
         self.records.append((level, message))
 
     def debug(self, message: str, **kwargs) -> None:
+        """Record a debug message."""
         self._log('debug', message, kwargs)
 
     def info(self, message: str, **kwargs) -> None:
+        """Record an info message."""
         self._log('info', message, kwargs)
 
     def warn(self, message: str, **kwargs) -> None:
+        """Record a warning."""
         self._log('warn', message, kwargs)
 
     def warning(self, message: str, **kwargs) -> None:
+        """Record a warning; an alias of warn."""
         self._log('warn', message, kwargs)
 
     def error(self, message: str, **kwargs) -> None:
+        """Record an error."""
         self._log('error', message, kwargs)
 
 
@@ -133,14 +172,22 @@ class Publisher:
     """Records every published message."""
 
     def __init__(self, topic: str) -> None:
+        """
+        Start with no messages and no subscribers.
+
+        Args:
+            topic (str): Topic name.
+        """
         self.topic = topic
         self.messages = []
         self.subscribers = 0                # tests set this to pretend someone is listening
 
     def publish(self, msg) -> None:
+        """Record a published message."""
         self.messages.append(msg)
 
     def get_subscription_count(self) -> int:
+        """Return the subscriber count set by the test."""
         return self.subscribers
 
 
@@ -152,6 +199,12 @@ class Node:
     """rclpy.node.Node with only what our nodes use."""
 
     def __init__(self, node_name: str, **kwargs) -> None:
+        """
+        Create the node with empty parameters, publishers, callbacks and timers.
+
+        Args:
+            node_name (str): Name used to look up PARAM_OVERRIDES.
+        """
         self._name = node_name
         self._params = {}
         self._logger = Logger()
@@ -160,33 +213,46 @@ class Node:
         self.timers = []
 
     def declare_parameter(self, name: str, value=None, *args, **kwargs) -> Parameter:
+        """
+        Declare a parameter; PARAM_OVERRIDES wins over the default.
+
+        Returns:
+            Parameter: The value in use.
+        """
         value = PARAM_OVERRIDES.get(self._name, {}).get(name, value)
         self._params[name] = value
         return Parameter(value)
 
     def get_parameter(self, name: str) -> Parameter:
+        """Return a declared parameter."""
         return Parameter(self._params[name])
 
     def create_publisher(self, msg_type, topic: str, qos) -> Publisher:
+        """Create a recording Publisher, kept in publishers_by_topic."""
         pub = Publisher(topic)
         self.publishers_by_topic[topic] = pub
         return pub
 
     def create_subscription(self, msg_type, topic: str, callback, qos) -> object:
+        """Keep the callback in callbacks_by_topic so tests can call it."""
         self.callbacks_by_topic[topic] = callback
         return object()
 
     def create_timer(self, period: float, callback) -> object:
+        """Keep (period, callback) in timers so tests can call it."""
         self.timers.append((period, callback))
         return object()
 
     def get_clock(self) -> FakeClock:
+        """Return the shared fake clock."""
         return CLOCK
 
     def get_logger(self) -> Logger:
+        """Return this node's recording logger."""
         return self._logger
 
     def destroy_node(self) -> None:
+        """Do nothing (nothing to release)."""
         pass
 
 
@@ -196,6 +262,7 @@ class Header:
     """std_msgs/Header."""
 
     def __init__(self) -> None:
+        """Start with a zero stamp and an empty frame_id."""
         self.stamp = Stamp()
         self.frame_id = ''
 
@@ -204,6 +271,7 @@ class LaserScan:
     """sensor_msgs/LaserScan."""
 
     def __init__(self) -> None:
+        """Start with zero geometry and no ranges."""
         self.header = Header()
         self.angle_min = 0.0
         self.angle_max = 0.0
@@ -220,6 +288,7 @@ class Image:
     """sensor_msgs/Image."""
 
     def __init__(self) -> None:
+        """Start as an empty image."""
         self.header = Header()
         self.height = 0
         self.width = 0
@@ -233,6 +302,7 @@ class CameraInfo:
     """sensor_msgs/CameraInfo (fields we use)."""
 
     def __init__(self) -> None:
+        """Start with zero intrinsics and size."""
         self.header = Header()
         self.k = [0.0] * 9
         self.width = 0
@@ -240,20 +310,29 @@ class CameraInfo:
 
 
 class _Vector3:
+    """geometry_msgs/Vector3."""
+
     def __init__(self) -> None:
+        """Start at zero."""
         self.x = 0.0
         self.y = 0.0
         self.z = 0.0
 
 
 class _Twist:
+    """geometry_msgs/Twist."""
+
     def __init__(self) -> None:
+        """Start with zero linear and angular velocity."""
         self.linear = _Vector3()
         self.angular = _Vector3()
 
 
 class _TwistWithCovariance:
+    """geometry_msgs/TwistWithCovariance (twist only)."""
+
     def __init__(self) -> None:
+        """Start with a zero twist."""
         self.twist = _Twist()
 
 
@@ -261,6 +340,7 @@ class Odometry:
     """nav_msgs/Odometry (twist only)."""
 
     def __init__(self) -> None:
+        """Start with a zero twist."""
         self.header = Header()
         self.twist = _TwistWithCovariance()
 
@@ -269,6 +349,7 @@ class AckermannDrive:
     """ackermann_msgs/AckermannDrive."""
 
     def __init__(self) -> None:
+        """Start with zero steering and speed."""
         self.steering_angle = 0.0
         self.steering_angle_velocity = 0.0
         self.speed = 0.0
@@ -280,6 +361,7 @@ class AckermannDriveStamped:
     """ackermann_msgs/AckermannDriveStamped."""
 
     def __init__(self) -> None:
+        """Start with an empty header and a zero drive command."""
         self.header = Header()
         self.drive = AckermannDrive()
 
@@ -288,6 +370,7 @@ class _Data:
     """std_msgs messages with a single data field."""
 
     def __init__(self, data=None) -> None:
+        """Store the data field."""
         self.data = data
 
 
@@ -307,15 +390,27 @@ class CvBridge:
     """cv_bridge.CvBridge; tests call the node logic directly instead."""
 
     def imgmsg_to_cv2(self, msg, desired_encoding: str = 'passthrough'):
+        """Raise NotImplementedError: tests pass NumPy images directly."""
         raise NotImplementedError('tests pass NumPy images directly')
 
     def cv2_to_imgmsg(self, img, encoding: str = 'passthrough'):
+        """Raise NotImplementedError: tests pass NumPy images directly."""
         raise NotImplementedError('tests pass NumPy images directly')
 
 
 # Install ----------------------------------------------------------------------------------------
 
 def _module(name: str, **attrs) -> types.ModuleType:
+    """
+    Create a module with the given attributes and register it in sys.modules.
+
+    Args:
+        name (str): Full module name.
+        **attrs: Attributes to set on it.
+
+    Returns:
+        types.ModuleType: The new module.
+    """
     module = types.ModuleType(name)
     for key, value in attrs.items():
         setattr(module, key, value)
@@ -367,7 +462,20 @@ def lidar_angles():
 def make_scan(ranges, angle_min: float = LIDAR_ANGLE_MIN,
               angle_increment: float = LIDAR_INCREMENT,
               range_min: float = 0.06, range_max: float = 10.0, t: float = 0.0) -> LaserScan:
-    """Build a LaserScan message from a list of ranges."""
+    """
+    Build a LaserScan message from a list of ranges.
+
+    Args:
+        ranges: Range of each beam (m).
+        angle_min (float): Bearing of the first beam (rad).
+        angle_increment (float): Spacing between beams (rad).
+        range_min (float): Shortest valid range (m).
+        range_max (float): Longest valid range (m).
+        t (float): Header stamp (s).
+
+    Returns:
+        LaserScan: The message.
+    """
     scan = LaserScan()
     scan.header.stamp = stamp(t)
     scan.angle_min = angle_min
@@ -380,7 +488,7 @@ def make_scan(ranges, angle_min: float = LIDAR_ANGLE_MIN,
 
 
 def make_request(steering: float, speed: float) -> AckermannDriveStamped:
-    """Build a drive request."""
+    """Build a drive request with a steering angle (rad) and speed (m/s)."""
     msg = AckermannDriveStamped()
     msg.drive.steering_angle = steering
     msg.drive.speed = speed
@@ -408,6 +516,7 @@ def world_scan(world, x: float, y: float, yaw: float):
     """
     import math
     import numpy as np
+    # world points into the car frame
     d = np.asarray(world, dtype=float) - [x, y]
     c, s = math.cos(-yaw), math.sin(-yaw)
     px = c * d[:, 0] - s * d[:, 1]
@@ -434,6 +543,7 @@ def world_scan(world, x: float, y: float, yaw: float):
 def wall_points(x0: float, y0: float, x1: float, y1: float, step: float = WALL_STEP):
     """Return dense points (Nx2) along a straight wall from (x0, y0) to (x1, y1)."""
     import numpy as np
+    # at least 2 points, about step apart
     n = max(2, int(np.hypot(x1 - x0, y1 - y0) / step))
     t = np.linspace(0.0, 1.0, n)
     return np.stack([x0 + t * (x1 - x0), y0 + t * (y1 - y0)], axis=1)
@@ -461,6 +571,7 @@ def add_box(ranges, x: float, y_min: float, y_max: float):
     import numpy as np
     a = lidar_angles()
     out = np.array(ranges, dtype=float)
+    # where each beam crosses the line x = const
     with np.errstate(divide='ignore', invalid='ignore'):
         r_face = x / np.cos(a)
         y_face = r_face * np.sin(a)

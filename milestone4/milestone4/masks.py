@@ -1,25 +1,8 @@
 """
-Colour segmentation: which pixels are track wall and which are cardboard box.
+HSV colour segmentation of black ducting (walls) and cardboard boxes (no ROS code).
 
-The track boundary is black ducting and the obstacles are cardboard boxes; both
-stand out against the light grey floor (Vision intro, slide 26: bright floor,
-dark walls).
-
-The image is converted to HSV (slide 18: cv2.cvtColor with COLOR_BGR2HSV)
-because HSV separates the kind of colour (hue), its intensity (saturation) and
-its brightness (value) (slide 13). That makes both rules one-line thresholds:
-black ducting is low value whatever its hue, and cardboard is a brown/orange
-hue with clear saturation, while the grey floor has almost none. Each rule gives
-a binary image, like cv2.threshold (slide 20).
-
-Milestone 4 change: the two rules are kept as two separate masks. The wall mask
-and the box mask are combined with a bitwise OR (slide 19) for the driving scan,
-and the box mask alone is published as /camera_box_mask: the fusion node looks up
-each LiDAR point's pixel in it to tell which points are boxes. A pixel is never
-in both masks.
-
-Anything above the horizon (chairs, people, the room) is never used later, so
-it does not matter if it matches too.
+split_masks() returns separate wall and box masks (never overlapping);
+wall_mask(), box_mask() and obstacle_mask() (their OR) are convenience wrappers.
 """
 
 from dataclasses import dataclass
@@ -77,6 +60,7 @@ def _clean(mask: np.ndarray, open_kernel: int) -> np.ndarray:
         np.ndarray: HxW uint8 mask, 255 for a hit and 0 otherwise.
     """
     mask_u8 = mask.astype(np.uint8) * 255
+    # erode then dilate with a square kernel to remove speckle
     if open_kernel > 1:
         kernel = np.ones((open_kernel, open_kernel), np.uint8)
         mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)

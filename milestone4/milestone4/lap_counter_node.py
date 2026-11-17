@@ -1,33 +1,10 @@
 """
-Lap counter for Milestone 4 (camera + LiDAR + odometry).
+ROS 2 node: count laps by recognising the start from camera, LiDAR and odometry.
 
-The car starts at the start line. The first frames from the colour camera and the first
-LiDAR scans are averaged into a reference "view" of the start. After that, every new
-frame and scan is compared with the reference; when the car is back at the start, they
-look alike.
-
-Milestone 3 used the camera only and was temperamental (lighting, small heading
-changes). Milestone 4 fuses three sources:
-    camera:   zero-mean cosine similarity of a small L*a*b* thumbnail (as in Milestone 3)
-    LiDAR:    zero-mean cosine similarity of the 270 degree range profile; it does not
-              depend on lighting and sees the whole room shape around the start
-    odometry: the distance driven since the last lap; a lap only counts after
-              min_lap_distance, and after lap 1 after lap_distance_fraction of lap 1
-              (straights look alike to the LiDAR; the gate stops look-alike matches)
-
-The lap counter then:
-    a. combines the camera and LiDAR similarities into one score (weights w_cam, w_lidar);
-       if one source is missing or stale, the other is used alone
-    b. confirms a match when the score stays above the threshold for a few ticks in a row
-       and the distance gate is open, then counts the lap at the score's peak
-    c. publishes /lap_count, the scores on /lap_counter/similarity (and _cam / _lidar)
-    d. after num_laps laps, requests a latched stop: negative speed on /drive_request,
-       repeated every 0.1 s
-
-This is received by safety_node, which stops the car and keeps it stopped.
-A debug image is published on /lap_counter/debug when someone is subscribed.
-The only log line is one per lap: "Lap 2/3 (score 0.91, 14.2 m driven)", with ": stopping"
-added after the last lap.
+The first frames and scans form a reference view of the start. Later views are
+scored against it (zero-mean cosine similarity); a lap counts at the score's peak
+once the odometry distance gate is open. After num_laps laps a latched stop
+(negative speed) is requested on /drive_request.
 """
 
 # include needed imports
@@ -89,7 +66,10 @@ class LapCounterNode(Node):
     """
     Lap counter that recognises the start from the camera and the LiDAR.
 
-    Requests a latched stop from the safety node after num_laps laps.
+    Subscribes to color_topic (if use_camera), scan and ego_racecar/odom. Publishes
+    lap_count (Int32), lap_counter/similarity[_cam|_lidar] (Float32), the debug image
+    lap_counter/debug while subscribed, and after num_laps laps a latched stop
+    (negative speed) on drive_request every 0.1 s.
     """
 
     def __init__(self) -> None:
@@ -210,7 +190,12 @@ class LapCounterNode(Node):
         self.create_timer(0.1, self.stop_timer_callback)
 
     def now_seconds(self) -> float:
-        """Return the node clock time in seconds."""
+        """
+        Return the node clock time in seconds.
+
+        Returns:
+            float: Current time (s).
+        """
         return self.get_clock().now().nanoseconds * 1e-9
 
     # [ Step 1 ] signatures
@@ -226,6 +211,7 @@ class LapCounterNode(Node):
             thumb: float32 L*a*b* thumbnail of shape (height, width, 3)
         """
         rows = max(1, bgr.shape[0] - self.IGNORE_BOTTOM_ROWS)   # drop the car body
+        # shrink and blur so small shifts and noise barely change the signature
         small = cv2.resize(bgr[:rows], self.THUMB_SIZE, interpolation=cv2.INTER_AREA)
         small = cv2.GaussianBlur(small, (self.BLUR_KSIZE, self.BLUR_KSIZE), 0)
         return cv2.cvtColor(small, cv2.COLOR_BGR2LAB).astype(np.float32)
@@ -257,10 +243,12 @@ class LapCounterNode(Node):
         Returns:
             profile: LIDAR_BINS averaged ranges, clipped at LIDAR_CLIP (m)
         """
+        # invalid readings count as far away (LIDAR_CLIP)
         r = np.asarray(scan.ranges, dtype=np.float64)
         with np.errstate(invalid='ignore'):
             r = np.where(np.isfinite(r) & (r >= scan.range_min), r, self.LIDAR_CLIP)
         r = np.minimum(r, self.LIDAR_CLIP)
+        # average neighbouring beams into LIDAR_BINS bins
         bins = min(self.LIDAR_BINS, r.size)
         return np.array([chunk.mean() for chunk in np.array_split(r, bins)])
 
@@ -281,7 +269,7 @@ class LapCounterNode(Node):
         """
         sig = self.lidar_signature(profile)
         if sig.size != self.lidar_reference.size:
-            return 0.0
+            return 0.0                           # different scan geometry: no match
         return max(float(np.dot(np.roll(sig, k), self.lidar_reference))
                    for k in range(-self.LIDAR_SHIFT, self.LIDAR_SHIFT + 1))
 
@@ -312,6 +300,7 @@ class LapCounterNode(Node):
             bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             self.thumb = self.make_thumbnail(bgr)
             self.thumb_time = self.now_seconds()
+            # still building the reference: add this thumbnail to the running sum
             if self.cam_reference is None and self.camera_reference_open(self.thumb_time):
                 self.cam_sum = self.thumb.astype(np.float64) + (
                     self.cam_sum if self.cam_sum is not None else 0.0)
@@ -336,6 +325,7 @@ class LapCounterNode(Node):
                 return                           # a different scan geometry; ignore it
             self.profile = profile
             self.profile_time = self.now_seconds()
+            # reference phase: add this profile to the running sum
             if self.phase == 'reference':
                 self.lidar_sum = profile + (self.lidar_sum if self.lidar_sum is not None
                                             else 0.0)
@@ -353,6 +343,7 @@ class LapCounterNode(Node):
         t = self.now_seconds()
         if self.last_odom_time is not None:
             dt = min(max(t - self.last_odom_time, 0.0), 0.2)   # ignore long gaps
+            # integrate |speed| over time (odometry can read negative going forward)
             self.distance += abs(msg.twist.twist.linear.x) * dt
         self.last_odom_time = t
 
@@ -369,6 +360,7 @@ class LapCounterNode(Node):
             (score, sim_cam, sim_lidar): combined score and each source's similarity;
             None for a source that is missing or stale (score None if both are)
         """
+        # each source counts only with a reference and a fresh input
         sim_cam = sim_lidar = None
         if (self.cam_reference is not None and self.thumb is not None
                 and now - self.thumb_time <= self.INPUT_TIMEOUT):
@@ -377,6 +369,7 @@ class LapCounterNode(Node):
                 and now - self.profile_time <= self.INPUT_TIMEOUT):
             sim_lidar = self.lidar_similarity(self.profile)
 
+        # weighted average of the sources that are available
         parts = [(w, s) for w, s in ((self.CAMERA_WEIGHT, sim_cam), (self.LIDAR_WEIGHT, sim_lidar))
                  if s is not None and w > 0.0]
         if not parts:
@@ -387,7 +380,13 @@ class LapCounterNode(Node):
     # [ Step 3 ] count laps
 
     def lap_gate(self) -> float:
-        """Return the distance the car must drive before the next lap can count (m)."""
+        """
+        Return the distance the car must drive before the next lap can count.
+
+        Returns:
+            float: MIN_LAP_DISTANCE before lap 1 is known, then the larger of it and
+            LAP_DISTANCE_FRACTION of lap 1 (m).
+        """
         if self.first_lap_distance is None:
             return self.MIN_LAP_DISTANCE
         return max(self.MIN_LAP_DISTANCE, self.LAP_DISTANCE_FRACTION * self.first_lap_distance)
@@ -512,7 +511,8 @@ class LapCounterNode(Node):
         if still_at_top and now - self.peak_since < self.PEAK_TIMEOUT:
             return False
 
-        # lap counted: back to blind, so one pass over the start counts once
+        # lap counted: back to blind, so one pass over the start counts once; the lap's
+        # length is recorded and lap 1 sets the distance gate for the later laps
         self.peak = None
         self.laps += 1
         self.last_lap_length = self.distance - self.lap_start_distance
@@ -557,6 +557,7 @@ class LapCounterNode(Node):
             if now - self.ref_start >= self.REFERENCE_TIME:
                 self.finish_reference(now)
             return
+        # the camera started late: try to build its reference from the late frames
         if self.USE_CAMERA and self.cam_reference is None:
             self.late_camera_reference()
 
@@ -585,7 +586,7 @@ class LapCounterNode(Node):
     # Outputs
 
     def publish_stop(self) -> None:
-        """Send the latched-stop request (negative speed) to the safety node."""
+        """Send the latched-stop request (negative speed, straight) on drive_request."""
         stop = AckermannDriveStamped()
         stop.header.stamp = self.get_clock().now().to_msg()
         stop.drive.speed = -1.0          # negative speed = latched stop flag
@@ -623,6 +624,7 @@ class LapCounterNode(Node):
         score, sim_cam, sim_lidar = self.scores
 
         def fmt(x: float | None) -> str:
+            """Return a score with 2 decimals, or 'n/a' for None."""
             return 'n/a' if x is None else f'{x:.2f}'
 
         line1 = f'lap {self.laps}/{self.NUM_LAPS}  {self.phase}  armed {self.armed}'
@@ -639,7 +641,12 @@ class LapCounterNode(Node):
 
 
 def main(args=None) -> None:
-    """Run the lap counter node."""
+    """
+    Run the lap counter node until interrupted (console entry point).
+
+    Args:
+        args: Command-line arguments passed to rclpy.init (None = sys.argv).
+    """
     rclpy.init(args=args)                   # initialize ROS 2
     lap_counter_node = LapCounterNode()     # creates LapCounterNode instance
     try:

@@ -1,29 +1,14 @@
 """
 Braking model shared by safety_node and gap_follow_node (no ROS code).
 
-AEB lecture: TTC = range / closing speed, and the car brakes when TTC is below a threshold.
-Milestone 2 and 3 used one fixed threshold. Here the threshold is the time the car actually
-needs to stop, so it grows with speed (a variable TTC):
+The AEB threshold is a variable TTC: the time the car needs to stop at its speed v,
+given an obstacle approaching at e (0 if static):
 
-    required TTC   T(v, e) = t_react + (v / (2 a_brake)) * (v + 2 e) / (v + e) + ttc_margin
+    T(v, e) = t_react + (v / (2 a_brake)) * (v + 2 e) / (v + e) + ttc_margin
 
-    v: our speed, e: how fast the obstacle comes towards us on its own (0 if static)
-
-It comes from the distance we need, divided by the closing speed (v + e):
-    reaction distance v * t_react, braking distance v^2 / (2 a_brake), and the distance the
-    obstacle covers meanwhile, e * (t_react + v / a_brake).
-For a static obstacle it is simply t_react + v / (2 a_brake) + ttc_margin; with the default
-values that is 0.38 s at 0.5 m/s, 0.50 s at 1 m/s, 0.62 s at 1.5 m/s and 0.75 s at 2 m/s.
-
-TTC is measured to the safety margin, not to the obstacle:
-    ttc = (distance along the path - stop_margin) / closing speed
-so the margin in front of the bumper stays a distance at every speed, and a gap of zero is
-always an emergency, even when crawling.
-
-The same model sets the speeds:
-    the safety node caps the speed so that ttc stays above slow_factor * T (soft stage) and
-    brakes when ttc <= T (hard stage); the planner aims for plan_factor * T, a little more
-    than slow_factor, so the safety node rarely has to step in.
+TTC is measured to the stop margin, (path distance - stop_margin) / closing speed. The
+safety node brakes when ttc <= T and caps speed at slow_factor * T; the planner aims
+for plan_factor * T.
 """
 
 from __future__ import annotations
@@ -86,6 +71,7 @@ def required_ttc(speed, obstacle_speed, t_react: float, a_brake: float,
     v = np.asarray(speed, dtype=np.float64)
     e = np.maximum(np.asarray(obstacle_speed, dtype=np.float64), 0.0)
     closing = v + e
+    # share = (v + 2e) / (v + e); 1 when nothing is closing, to avoid dividing by zero
     with np.errstate(invalid='ignore', divide='ignore'):
         share = np.where(closing > 1e-9, (v + 2.0 * e) / np.where(closing > 1e-9, closing, 1.0),
                          1.0)
@@ -113,6 +99,7 @@ def slow_speed_cap(gap, obstacle_speed, factor: float, t_react: float, a_brake: 
     Returns:
         np.ndarray: Speed cap (m/s, >= 0).
     """
+    # solve safe_speed() on gap / factor, with the TTC margin added to the reaction time
     g = np.maximum(np.asarray(gap, dtype=np.float64), 0.0) / max(factor, 1e-6)
     t = t_react + ttc_margin
     v = a_brake * (-t + np.sqrt(t * t + 2.0 * g / a_brake))
@@ -175,5 +162,6 @@ def car_motion(speed: float, yaw_rate: float, dt: float) -> tuple[float, float, 
     """
     turn = yaw_rate * dt
     if abs(yaw_rate) < 1e-3:
-        return speed * dt, 0.0, turn
+        return speed * dt, 0.0, turn       # (nearly) straight line
+    # constant-curvature arc of radius speed / yaw_rate
     return speed / yaw_rate * math.sin(turn), speed / yaw_rate * (1.0 - math.cos(turn)), turn

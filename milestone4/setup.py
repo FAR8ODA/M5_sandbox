@@ -1,3 +1,5 @@
+"""Package setup for milestone4: installs the nodes, launch file and config."""
+
 from glob import glob
 import os
 
@@ -13,6 +15,7 @@ setup(
         exclude=['test']
     ),
 
+    # files installed beside the package: ament index marker, manifest, launch, config
     data_files=[
         (
             'share/ament_index/resource_index/packages',
@@ -44,6 +47,7 @@ setup(
 
     tests_require=['pytest'],
 
+    # one ros2 run executable per node
     entry_points={
         'console_scripts': [
             'camera_scan_node = milestone4.camera_scan_node:main',

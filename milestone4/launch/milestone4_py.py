@@ -1,18 +1,9 @@
 """
 Launch file for Milestone 4: LiDAR-primary driving with camera fusion and AEB.
 
-Every node's parameters come from config/milestone4.yaml (or params_file:=...). A launch
-argument given on the command line overrides the file for that run only:
-
-On the car (after starting the F1Tenth stack and, unless start_camera:=true, the camera):
-    ros2 launch milestone4 milestone4_py.py
-    ros2 launch milestone4 milestone4_py.py max_speed:=1.5 a_brake:=2.5
-    ros2 launch milestone4 milestone4_py.py use_camera:=false        # LiDAR only (or sim)
-
-In the simulator:
-    ros2 launch milestone4 milestone4_py.py use_camera:=false odom_topic:=/ego_racecar/odom
-
-Only safety_node publishes to /drive. Every other node sends requests on /drive_request.
+Parameters come from config/milestone4.yaml (or params_file:=...); tuning arguments
+given on the command line override it for that run, e.g.
+    ros2 launch milestone4 milestone4_py.py max_speed:=1.5 use_camera:=false
 """
 
 from typing import Callable, Dict, List, Tuple
@@ -39,6 +30,7 @@ def as_bool(value: str) -> bool:
     Raises:
         ValueError: If the value is not true or false.
     """
+    # case-insensitive, surrounding spaces ignored
     text = value.strip().lower()
     if text not in ('true', 'false'):
         raise ValueError(f'expected true or false, got {value!r}')
@@ -110,6 +102,7 @@ def load_parameter_file(path: str) -> Dict[str, dict]:
     """
     with open(path, encoding='utf-8') as stream:
         document = yaml.safe_load(stream) or {}
+    # strip the leading '/' from node sections; empty sections become empty dicts
     return {(name if name == '/**' else name.lstrip('/')):
             dict((section or {}).get('ros__parameters') or {})
             for name, section in document.items()}
@@ -126,6 +119,7 @@ def overrides_for(node: str, context: LaunchContext) -> dict:
     Returns:
         dict: {parameter: typed value} for every given argument; empty if none were given.
     """
+    # only arguments given on the command line (non-empty) override, cast to their type
     casts = {name: cast for name, _, cast in TUNING_ARGS}
     params = {}
     for param, arg in OVERRIDES.get(node, {}).items():
@@ -153,6 +147,7 @@ def launch_nodes(context: LaunchContext) -> list:
     Returns:
         list: The RealSense include and the Milestone 4 nodes.
     """
+    # resolve the launch arguments to plain values
     sections = load_parameter_file(LaunchConfiguration('params_file').perform(context))
     use_camera = as_bool(LaunchConfiguration('use_camera').perform(context))
     use_depth = as_bool(LaunchConfiguration('use_depth').perform(context))
@@ -160,7 +155,16 @@ def launch_nodes(context: LaunchContext) -> list:
     odom = [('ego_racecar/odom', LaunchConfiguration('odom_topic').perform(context))]
 
     def params(node: str, extra: dict | None = None) -> list:
-        """Merge the file's shared and own sections, the sensor switches and the overrides."""
+        """
+        Merge the file's shared and own sections, the sensor switches and the overrides.
+
+        Args:
+            node (str): Node name (its section in the parameter file).
+            extra (dict | None): Sensor switches set by this launch file.
+
+        Returns:
+            list: One parameter dict, as Node(parameters=...) expects.
+        """
         return [{**sections.get('/**', {}), **sections.get(node, {}), **(extra or {}),
                  **overrides_for(node, context)}]
 
@@ -231,7 +235,7 @@ def launch_nodes(context: LaunchContext) -> list:
 
 def generate_launch_description() -> LaunchDescription:
     """
-    Milestone 4 Launch File with Args.
+    Declare the launch arguments and defer node creation to launch_nodes().
 
     Returns:
         LaunchDescription: Launch arguments and the Milestone 4 nodes.
@@ -253,6 +257,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('odom_topic', default_value='/odom',
                               description='Odometry topic (/ego_racecar/odom in the sim).'),
     ]
+    # tuning arguments default to '' so that the parameter file decides
     args += [DeclareLaunchArgument(name, default_value='',
                                    description=f'{text} Default: params_file.')
              for name, text, _ in TUNING_ARGS]

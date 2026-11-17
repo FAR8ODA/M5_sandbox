@@ -1,12 +1,8 @@
 """
 Closed-loop simulation of the Milestone 4 nodes (no ROS needed).
 
-The real fusion_node, gap_follow_node, safety_node and lap_counter_node run together
-against a simulated stadium-shaped track: a LiDAR scan is ray-cast from the car's pose,
-the nodes' messages are passed between them as ROS would, and the car follows the
-/drive command with a simple bicycle model (limited acceleration and braking).
-
-Used by test_closed_loop.py, and runnable on its own to print a lap report:
+The real fusion, gap follow, safety and lap counter nodes drive a bicycle-model car
+around a simulated track via run(). Run directly for a lap report:
     cd milestone4/test && python3 closed_loop.py
 """
 
@@ -44,7 +40,17 @@ def stadium_track(straight=6.0, radius=2.0, half_lane=0.6, step=ros_stubs.WALL_S
 
     The centreline has two straights along x (y = -radius and y = +radius) joined by
     semicircles; the car starts at the origin of the lower straight heading +x.
+
+    Args:
+        straight (float): Length of each straight (m).
+        radius (float): Centreline radius of the bends (m).
+        half_lane (float): Half the lane width (m).
+        step (float): Spacing of the wall points (m).
+
+    Returns:
+        tuple: (Nx2 wall points, centreline length in m).
     """
+    # inner and outer wall: two straights and two semicircles each
     walls = []
     for r in (radius - half_lane, radius + half_lane):
         n_straight = int(straight / step)
@@ -60,7 +66,18 @@ def stadium_track(straight=6.0, radius=2.0, half_lane=0.6, step=ros_stubs.WALL_S
 
 
 def box(cx, cy, size=0.4, step=ros_stubs.WALL_STEP):
-    """Return dense points around a square box centred at (cx, cy)."""
+    """
+    Return dense points around a square box.
+
+    Args:
+        cx (float): Centre x (m).
+        cy (float): Centre y (m).
+        size (float): Side length (m).
+        step (float): Spacing of the points (m).
+
+    Returns:
+        np.ndarray: Nx2 points on the four sides.
+    """
     h = size / 2.0
     corners = [(cx - h, cy - h), (cx + h, cy - h), (cx + h, cy + h), (cx - h, cy + h)]
     sides = [ros_stubs.wall_points(*corners[i], *corners[(i + 1) % 4], step) for i in range(4)]
@@ -74,6 +91,13 @@ def blocking_boxes(radius=2.0, x=0.0):
     The far straight's centreline is at y = 2 * radius. The boxes cover 0.8 m of the lane's
     middle, leaving gaps of 0.2 m each side on a 1.2 m lane: too narrow for the 0.3 m car,
     so it must stop in front of them.
+
+    Args:
+        radius (float): Centreline radius of the stadium track (m).
+        x (float): Position of the boxes along the straight (m).
+
+    Returns:
+        np.ndarray: Nx2 points of both boxes.
     """
     centre = 2.0 * radius
     return np.vstack([box(x, centre - 0.2), box(x, centre + 0.2)])
@@ -85,7 +109,19 @@ def depth_scan(points, x, y, yaw, t, fov=math.radians(87.0), beams=90, range_max
 
     The camera sits on the LiDAR (cam_x = cam_y = 0), looks straight ahead with the D435i's
     87 degree depth field of view, and reports range_max where it sees nothing.
+
+    Args:
+        points: Nx2 world points the depth camera can see (m).
+        x, y, yaw: Camera pose (m, m, rad).
+        t (float): Header stamp (s).
+        fov (float): Horizontal field of view (rad).
+        beams (int): Number of beams.
+        range_max (float): Longest range, also "nothing seen" (m).
+
+    Returns:
+        LaserScan: The simulated /depth_scan.
     """
+    # points into the camera frame, then the nearest point per beam
     d = np.asarray(points, dtype=float) - [x, y]
     c, s = math.cos(-yaw), math.sin(-yaw)
     px, py = c * d[:, 0] - s * d[:, 1], s * d[:, 0] + c * d[:, 1]
@@ -105,12 +141,25 @@ def box_labels(scan, box_centres, x, y, yaw, t, probability, rng, half_size=0.2)
 
     The real camera labels a box in some frames and not in others; each scan here labels
     every box with the given probability, like a flickering camera.
+
+    Args:
+        scan (LaserScan): Scan to label (the fused scan).
+        box_centres: (x, y) world centre of each box (m).
+        x, y, yaw: LiDAR pose (m, m, rad).
+        t (float): Header stamp (s).
+        probability (float): Chance that this scan labels the boxes (0-1).
+        rng (random.Random): Random source.
+        half_size (float): Half a box's side (m).
+
+    Returns:
+        LaserScan: Box ranges on labelled beams, inf elsewhere.
     """
     r = np.asarray(scan.ranges, dtype=float)
     a = scan.angle_min + np.arange(r.size) * scan.angle_increment
     out = np.full(r.size, np.inf)
     if rng.random() < probability:
         c, s = math.cos(-yaw), math.sin(-yaw)
+        # a beam is labelled if it points at a box and its range is near the box's
         for cx, cy in box_centres:
             bx, by = c * (cx - x) - s * (cy - y), s * (cx - x) + c * (cy - y)
             dist = math.hypot(bx, by)
@@ -167,6 +216,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
         the largest persistent obstacle speed the safety node saw, and the steering jitter
         (mean change of the steering command per scan while moving, rad).
     """
+    # fresh clock and nodes, built with the run's parameter overrides
     ros_stubs.CLOCK.seconds = 0.0
     ros_stubs.PARAM_OVERRIDES.clear()
     ros_stubs.PARAM_OVERRIDES.update({
@@ -190,9 +240,11 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
     ros_stubs.PARAM_OVERRIDES.clear()
 
     def last(node, topic):
+        """Return the last message a node published on a topic, or None."""
         messages = node.publishers_by_topic[topic].messages
         return messages[-1] if messages else None
 
+    # car state, delay queues and the statistics returned at the end
     x = y = yaw = 0.0
     v = steer = actual = 0.0
     rng = random.Random(seed)
@@ -209,6 +261,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
     n_requests = n_stops = 0
     t = 0.0
     while t < max_time:
+        # odometry (with noise) -> every node
         ros_stubs.CLOCK.seconds = t
         points = world(t) if callable(world) else world
         lx, ly = x + lidar_offset * math.cos(yaw), y + lidar_offset * math.sin(yaw)   # LiDAR
@@ -225,6 +278,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
         # LiDAR -> fusion -> planner and safety (raw /scan goes to everyone too)
         if lidar_dropout is None or not lidar_dropout[0] <= t < lidar_dropout[1]:
             ranges = ros_stubs.world_scan(points, lx, ly, yaw)
+            # optional Gaussian range noise on the beams that hit something
             if range_noise > 0.0:
                 seen = np.isfinite(ranges)
                 ranges[seen] += noise.normal(0.0, range_noise, int(seen.sum()))
@@ -244,6 +298,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
             else:
                 late.append((t + scan_lag(t), fused, scan))
             laps.lidar_callback(scan)
+        # deliver delayed scans whose arrival time has come
         while late and late[0][0] <= t + 1e-9:
             _, fused_late, raw_late = late.pop(0)
             safety.fused_scan_callback(fused_late)
@@ -268,6 +323,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
         n_stops = len(stops)
 
         # the car follows /drive
+        # speed and steering go through their delay queues, then a bicycle model step
         command = last(safety, 'drive')
         speeds.append(command.drive.speed if command else 0.0)
         target = speeds.pop(0) if len(speeds) > int(round(drive_delay / STEP)) else 0.0
@@ -306,6 +362,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
             body_clearance, body_clearance_speed = gap, v
         trace.append((t, x, y, v, safety.safety_mode, laps.laps))
 
+        # finished: all laps counted and the car has stopped
         if laps.done and v < 0.01:
             break
         t += STEP
@@ -322,7 +379,14 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
 
 
 def report(name, result, lap_length):
-    """Print a short summary of a run."""
+    """
+    Print a short summary of a run.
+
+    Args:
+        name (str): Label for the run.
+        result (dict): Return value of run().
+        lap_length (float): Centreline length of the track (m).
+    """
     print(f'{name}: {result["laps"]} laps in {result["time"]:.1f} s, '
           f'{result["distance"]:.1f} m driven (lap {lap_length:.1f} m), '
           f'top speed {result["top_speed"]:.2f} m/s, closest wall {result["closest"]:.3f} m, '
