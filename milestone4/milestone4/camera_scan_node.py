@@ -7,8 +7,8 @@ from cv_bridge import CvBridge
 from milestone4.boundary import mask_scan, ScanResult
 from milestone4.camera_model import CameraModel
 from milestone4.masks import MaskParams, split_masks
+from milestone4.node_utils import run_node
 import numpy as np
-import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
@@ -206,22 +206,9 @@ class CameraScanNode(Node):
             self.get_logger().error(f'camera scan failed: {exc}', once=True)
 
 
-def main(args=None) -> None:
-    """
-    Run the camera scan node until interrupted (console entry point).
-
-    Args:
-        args: Command-line arguments passed to rclpy.init (None = sys.argv).
-    """
-    rclpy.init(args=args)
-    node = CameraScanNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    node.destroy_node()
-    if rclpy.ok():
-        rclpy.shutdown()
+def main() -> None:
+    """Run the camera scan node until Ctrl+C (console entry point)."""
+    run_node(CameraScanNode)
 
 
 if __name__ == '__main__':

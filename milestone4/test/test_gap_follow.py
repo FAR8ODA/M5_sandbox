@@ -130,12 +130,17 @@ class GapFollowTest(unittest.TestCase):
         self.node.fused_callback(ros_stubs.make_scan(ranges))
         self.assertGreater(self.requests()[-1].drive.steering_angle, 0.0)   # steers left
 
+    def corner(self, ranges, steering):
+        """Run side_distance() and corner_check() on ranges, as drive_on() does."""
+        beside = self.node.side_distance(ranges, self.angles, steering)
+        return self.node.corner_check(steering, beside)
+
     def test_corner_check_blocks_a_turn_into_the_side(self):
         """Check corner_check cancels a turn towards something beside the car."""
         r = np.full(self.angles.size, 3.0)
         r[np.abs(self.angles - math.radians(100.0)) < math.radians(2.0)] = 0.15  # left side
-        self.assertEqual(self.node.corner_check(r, self.angles, 0.3), 0.0)
-        self.assertEqual(self.node.corner_check(r, self.angles, -0.3), -0.3)
+        self.assertEqual(self.corner(r, 0.3), 0.0)
+        self.assertEqual(self.corner(r, -0.3), -0.3)
 
     def test_slows_for_the_straight_path_when_the_turn_may_be_cancelled(self):
         # a wall 1 m ahead and to the right, open to the left, and the car already turning
@@ -165,7 +170,7 @@ class GapFollowTest(unittest.TestCase):
         r = np.full(self.angles.size, 3.0)
         r[np.abs(self.angles - math.radians(100.0)) < math.radians(2.0)] = 0.05   # own body
         r[np.abs(self.angles - math.radians(130.0)) < math.radians(2.0)] = 0.15   # behind
-        self.assertEqual(self.node.corner_check(r, self.angles, 0.3), 0.3)
+        self.assertEqual(self.corner(r, 0.3), 0.3)
 
     def test_clear_straight_gives_max_speed(self):
         """Check a clear straight path gives max_speed."""

@@ -91,9 +91,9 @@ def simulate(args):
                 self._rec['target'] = (float(angles[i]), float(extended[i]))
             return i
 
-        def corner_check(self, ranges, angles, steering):
+        def corner_check(self, steering, beside):
             """Run the real corner check and record the final steering angle."""
-            out = super().corner_check(ranges, angles, steering)
+            out = super().corner_check(steering, beside)
             self._rec['steer'] = out
             return out
 

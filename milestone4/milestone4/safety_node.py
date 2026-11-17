@@ -16,6 +16,8 @@ import time
 
 from ackermann_msgs.msg import AckermannDriveStamped
 from milestone4.braking import car_motion, path_distances, required_ttc, slow_speed_cap
+from milestone4.fusion import clean_lidar
+from milestone4.node_utils import now_seconds, seconds_since, stamp_seconds
 from nav_msgs.msg import Odometry
 import numpy as np
 import rclpy
@@ -328,7 +330,7 @@ class SafetyNode(Node):
         Returns:
             float: Odometry speed, or the last commanded speed if odometry is stale.
         """
-        if self.age_seconds(self.last_odom_time) <= self.ODOM_TIMEOUT:
+        if seconds_since(self, self.last_odom_time) <= self.ODOM_TIMEOUT:
             return self.current_speed
         return self.last_command_speed
 
@@ -357,8 +359,8 @@ class SafetyNode(Node):
             float: Seconds; the node clock's time if the stamp is 0 (unstamped) or more than
             1 s away from it (a different clock).
         """
-        now = self.get_clock().now().nanoseconds * 1e-9
-        t = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        now = now_seconds(self)
+        t = stamp_seconds(stamp)
         # unstamped, or from another clock: fall back to the node clock
         if t <= 0.0 or abs(t - now) > 1.0:
             return now
@@ -455,10 +457,7 @@ class SafetyNode(Node):
             taken = self.msg_time(msg.header.stamp)        # when the scan was taken
 
             # invalid readings become inf; each beam also stored as an (x, y) point
-            ranges = np.array(msg.ranges, dtype=np.float64)
-            with np.errstate(invalid='ignore'):
-                bad = ~np.isfinite(ranges) | (ranges < msg.range_min) | (ranges > msg.range_max)
-            ranges[bad] = np.inf
+            ranges = clean_lidar(msg.ranges, msg.range_min, msg.range_max)
             angles = msg.angle_min + np.arange(ranges.size) * msg.angle_increment
             finite = np.isfinite(ranges)
             safe_r = np.where(finite, ranges, 0.0)
@@ -470,7 +469,7 @@ class SafetyNode(Node):
             source.angles = angles
             source.x = safe_r * np.cos(angles)
             source.y = safe_r * np.sin(angles)
-            if self.age_seconds(self.last_odom_time) > self.ODOM_TIMEOUT:
+            if seconds_since(self, self.last_odom_time) > self.ODOM_TIMEOUT:
                 self.advance_pose(self.measured_speed(), self.yaw_rate(), now_s)  # no odometry
             # the scan is matched with where the car was when it was taken, not on arrival
             source.tracker.add(taken, source.x[finite], source.y[finite], self.pose_at(taken))
@@ -521,9 +520,9 @@ class SafetyNode(Node):
             ScanSource | None: The scan, or None if both are stale.
         """
         fused, raw = self.sources['fused'], self.sources['raw']
-        if self.age_seconds(fused.time) <= self.SCAN_TIMEOUT:
+        if seconds_since(self, fused.time) <= self.SCAN_TIMEOUT:
             return fused
-        if self.age_seconds(raw.time) <= self.stale_timeout:
+        if seconds_since(self, raw.time) <= self.stale_timeout:
             return raw
         return None
 
@@ -559,7 +558,7 @@ class SafetyNode(Node):
 
         # TTC to the safety margin, and the TTC the car needs at this speed (variable). The
         # car has driven on since the scan was taken, so the gap is that much shorter
-        age = max(0.0, self.get_clock().now().nanoseconds * 1e-9 - source.capture)
+        age = max(0.0, now_seconds(self) - source.capture)
         gap = along - self.STOP_MARGIN - speed * age
         needed = np.broadcast_to(
             required_ttc(speed, extra, self.T_REACT, self.A_BRAKE, self.TTC_MARGIN), gap.shape)
@@ -703,7 +702,7 @@ class SafetyNode(Node):
         if source is None or not self.inputs_fresh():
             return
         if self.safety_mode == 'stale':
-            self.set_mode('normal')                     # inputs fresh again: resume
+            self.safety_mode = 'normal'                 # inputs fresh again: resume
 
         # requested speed, never above drive_speed (0 means drive_speed)
         speed = self.drive_speed
@@ -720,25 +719,11 @@ class SafetyNode(Node):
         # soft stage: slow down so the car can still stop (after AEB too: it drives on)
         if cap < speed:
             speed = max(cap, 0.0)
-            self.set_mode('slow')
+            self.safety_mode = 'slow'
         elif self.safety_mode in ('slow', 'aeb'):
-            self.set_mode('normal')
+            self.safety_mode = 'normal'
 
         self.publish_drive_command(speed, self.latest_steering_angle)
-
-    def age_seconds(self, stamp: Time | None) -> float:
-        """
-        Return how long ago an input arrived.
-
-        Args:
-            stamp (Time | None): Arrival time of the input, or None if never.
-
-        Returns:
-            float: Age in seconds, or inf if the input never arrived.
-        """
-        if stamp is None:
-            return math.inf
-        return (self.get_clock().now() - stamp).nanoseconds * 1e-9
 
     def inputs_fresh(self) -> bool:
         """
@@ -747,7 +732,7 @@ class SafetyNode(Node):
         Returns:
             bool: True if both arrived within stale_timeout.
         """
-        return (self.age_seconds(self.last_request_time) <= self.stale_timeout
+        return (seconds_since(self, self.last_request_time) <= self.stale_timeout
                 and self.active_source() is not None)
 
     def watchdog_callback(self) -> None:
@@ -764,7 +749,7 @@ class SafetyNode(Node):
             return
 
         if self.safety_mode in ('normal', 'slow', 'aeb'):
-            self.set_mode('stale')
+            self.safety_mode = 'stale'
         self.emergency_brake()
 
     # Outputs
@@ -777,15 +762,6 @@ class SafetyNode(Node):
             bool: True once the lap counter's stop request has latched the stop.
         """
         return self.safety_mode == 'stopped'
-
-    def set_mode(self, mode: str) -> None:
-        """
-        Change the safety mode (published on /safety/state, not logged).
-
-        Args:
-            mode (str): New mode: normal, slow or stale (engage_aeb() sets aeb, latch() stopped).
-        """
-        self.safety_mode = mode
 
     def latch(self, reason: str) -> None:
         """

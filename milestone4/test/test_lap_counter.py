@@ -37,7 +37,7 @@ class SignatureTest(unittest.TestCase):
 
     def signature(self, ranges):
         """Return the LiDAR signature of a set of ranges."""
-        return self.node.lidar_signature(self.node.lidar_profile(ros_stubs.make_scan(ranges)))
+        return unit_signature(self.node.lidar_profile(ros_stubs.make_scan(ranges)))
 
     def test_same_view_scores_one(self):
         """Check a view compared with itself scores 1."""

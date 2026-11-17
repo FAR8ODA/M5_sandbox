@@ -13,9 +13,9 @@ from __future__ import annotations
 from ackermann_msgs.msg import AckermannDriveStamped
 import cv2
 from cv_bridge import CvBridge
+from milestone4.node_utils import now_seconds, run_node
 from nav_msgs.msg import Odometry
 import numpy as np
-import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan
@@ -185,15 +185,6 @@ class LapCounterNode(Node):
         self.create_timer(self.TICK_PERIOD, self.tick)
         self.create_timer(0.1, self.stop_timer_callback)
 
-    def now_seconds(self) -> float:
-        """
-        Return the node clock time in seconds.
-
-        Returns:
-            float: Current time (s).
-        """
-        return self.get_clock().now().nanoseconds * 1e-9
-
     # [ Step 1 ] signatures
 
     def make_thumbnail(self, bgr: np.ndarray) -> np.ndarray:
@@ -225,9 +216,7 @@ class LapCounterNode(Node):
         v = thumb.astype(np.float64).reshape(-1, 3)
         v = v - v.mean(axis=0)                    # per channel: brightness/colour casts cancel
         v[:, 1:] *= self.COLOR_WEIGHT             # boost the colour channels
-        v = v.ravel()
-        norm = float(np.linalg.norm(v))
-        return np.zeros_like(v) if norm < 1e-6 else v / norm
+        return unit_signature(v)
 
     def lidar_profile(self, scan: LaserScan) -> np.ndarray:
         """
@@ -263,23 +252,11 @@ class LapCounterNode(Node):
         Returns:
             similarity: best zero-mean cosine similarity, -1 to 1
         """
-        sig = self.lidar_signature(profile)
+        sig = unit_signature(profile)
         if sig.size != self.lidar_reference.size:
             return 0.0                           # different scan geometry: no match
         return max(float(np.dot(np.roll(sig, k), self.lidar_reference))
                    for k in range(-self.LIDAR_SHIFT, self.LIDAR_SHIFT + 1))
-
-    def lidar_signature(self, profile: np.ndarray) -> np.ndarray:
-        """
-        Turn a LiDAR profile into a zero-mean, unit-length vector.
-
-        Args:
-            profile: from lidar_profile
-
-        Returns:
-            signature: unit vector (zeros if the profile is flat)
-        """
-        return unit_signature(profile)
 
     # Inputs
 
@@ -295,7 +272,7 @@ class LapCounterNode(Node):
         try:
             bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             self.thumb = self.make_thumbnail(bgr)
-            self.thumb_time = self.now_seconds()
+            self.thumb_time = now_seconds(self)
             # still building the reference: add this thumbnail to the running sum
             if self.cam_reference is None and self.camera_reference_open(self.thumb_time):
                 self.cam_sum = self.thumb.astype(np.float64) + (
@@ -318,7 +295,7 @@ class LapCounterNode(Node):
             if self.profile is not None and self.profile.size != profile.size:
                 return                           # a different scan geometry; ignore it
             self.profile = profile
-            self.profile_time = self.now_seconds()
+            self.profile_time = now_seconds(self)
             # reference phase: add this profile to the running sum
             if self.phase == 'reference':
                 self.lidar_sum = profile + (self.lidar_sum if self.lidar_sum is not None
@@ -334,7 +311,7 @@ class LapCounterNode(Node):
         Args:
             msg: Odometry message
         """
-        t = self.now_seconds()
+        t = now_seconds(self)
         if self.last_odom_time is not None:
             dt = min(max(t - self.last_odom_time, 0.0), 0.2)   # ignore long gaps
             # integrate |speed| over time (odometry can read negative going forward)
@@ -430,14 +407,18 @@ class LapCounterNode(Node):
         return (now - self.ref_start <= self.LATE_REFERENCE_TIME
                 and self.distance - self.ref_distance <= self.LATE_REFERENCE_MOVE)
 
-    def late_camera_reference(self) -> None:
+    def build_camera_reference(self, min_frames: int) -> None:
         """
-        Build the camera reference from late frames, once enough arrived near the start.
+        Average the collected camera thumbnails into the camera reference.
 
-        Frames are only collected while camera_reference_open(); if too few arrive, laps
-        are counted on the LiDAR only.
+        Frames are only collected while camera_reference_open(). If fewer than min_frames
+        have arrived, nothing is built yet; if the camera never delivers enough, laps are
+        counted on the LiDAR only.
+
+        Args:
+            min_frames: thumbnails needed before the reference is built
         """
-        if self.cam_count >= self.LATE_REFERENCE_FRAMES:
+        if self.cam_count >= max(1, min_frames):
             self.cam_reference = self.image_signature(self.cam_sum / self.cam_count)
 
     def finish_reference(self, now: float) -> None:
@@ -447,10 +428,9 @@ class LapCounterNode(Node):
         Args:
             now: current time (s)
         """
-        if self.cam_count > 0:
-            self.cam_reference = self.image_signature(self.cam_sum / self.cam_count)
+        self.build_camera_reference(1)
         if self.lidar_count > 0:
-            self.lidar_reference = self.lidar_signature(self.lidar_sum / self.lidar_count)
+            self.lidar_reference = unit_signature(self.lidar_sum / self.lidar_count)
         self.phase = 'blind'
         self.blind_until = now + self.BLIND_TIME
 
@@ -528,7 +508,7 @@ class LapCounterNode(Node):
         if self.done:
             return
         try:
-            self.evaluate(self.now_seconds())
+            self.evaluate(now_seconds(self))
         except Exception as exc:
             self.get_logger().error(f'lap counter failed: {exc}', once=True)
 
@@ -551,7 +531,7 @@ class LapCounterNode(Node):
             return
         # the camera started late: try to build its reference from the late frames
         if self.USE_CAMERA and self.cam_reference is None:
-            self.late_camera_reference()
+            self.build_camera_reference(self.LATE_REFERENCE_FRAMES)
 
         # b. similarity to the starting view
         score, sim_cam, sim_lidar = self.similarity(now)
@@ -590,22 +570,9 @@ class LapCounterNode(Node):
             self.publish_stop()
 
 
-def main(args=None) -> None:
-    """
-    Run the lap counter node until interrupted (console entry point).
-
-    Args:
-        args: Command-line arguments passed to rclpy.init (None = sys.argv).
-    """
-    rclpy.init(args=args)                   # initialize ROS 2
-    lap_counter_node = LapCounterNode()     # creates LapCounterNode instance
-    try:
-        rclpy.spin(lap_counter_node)        # spin the node running + callback
-    except KeyboardInterrupt:
-        pass
-    lap_counter_node.destroy_node()         # clears up the node
-    if rclpy.ok():
-        rclpy.shutdown()                    # shut down ROS2 (skip if Ctrl+C already did)
+def main() -> None:
+    """Run the lap counter node until Ctrl+C (console entry point)."""
+    run_node(LapCounterNode)
 
 
 if __name__ == '__main__':
