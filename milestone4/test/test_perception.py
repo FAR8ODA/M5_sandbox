@@ -151,7 +151,7 @@ class MaskTest(unittest.TestCase):
 
     def test_wall_and_box_masks_are_separate(self):
         """Check ducting and cardboard go to separate, non-overlapping masks."""
-        from milestone4.masks import MaskParams, obstacle_mask, split_masks
+        from milestone4.masks import MaskParams, split_masks
         img = np.full((100, 100, 3), 180, dtype=np.uint8)      # light grey floor
         img[60:80, :] = (20, 20, 20)                           # black ducting
         img[10:40, 30:60] = (40, 120, 200)                     # cardboard (BGR orange-brown)
@@ -161,8 +161,6 @@ class MaskTest(unittest.TestCase):
         self.assertTrue(box[25, 45] and not wall[25, 45])
         self.assertFalse(wall[5, 5] or box[5, 5])
         self.assertFalse(np.any((wall > 0) & (box > 0)))
-        self.assertTrue(np.array_equal(obstacle_mask(img, MaskParams()) > 0,
-                                       (wall > 0) | (box > 0)))
 
 
 if __name__ == '__main__':

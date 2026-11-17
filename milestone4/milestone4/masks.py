@@ -1,8 +1,7 @@
 """
 HSV colour segmentation of black ducting (walls) and cardboard boxes (no ROS code).
 
-split_masks() returns separate wall and box masks (never overlapping);
-wall_mask(), box_mask() and obstacle_mask() (their OR) are convenience wrappers.
+split_masks() returns separate wall and box masks, which never overlap.
 """
 
 from dataclasses import dataclass
@@ -98,43 +97,3 @@ def split_masks(bgr: np.ndarray, params: MaskParams) -> Tuple[np.ndarray, np.nda
         box = np.zeros_like(wall)
 
     return _clean(wall, params.open_kernel), _clean(box, params.open_kernel)
-
-
-def wall_mask(bgr: np.ndarray, params: MaskParams) -> np.ndarray:
-    """Return the mask of black ducting pixels.
-
-    Args:
-        bgr (np.ndarray): HxWx3 uint8 BGR image.
-        params (MaskParams): Thresholds to apply.
-
-    Returns:
-        np.ndarray: HxW uint8 mask, 255 on walls.
-    """
-    return split_masks(bgr, params)[0]
-
-
-def box_mask(bgr: np.ndarray, params: MaskParams) -> np.ndarray:
-    """Return the mask of cardboard box pixels.
-
-    Args:
-        bgr (np.ndarray): HxWx3 uint8 BGR image.
-        params (MaskParams): Thresholds to apply.
-
-    Returns:
-        np.ndarray: HxW uint8 mask, 255 on boxes.
-    """
-    return split_masks(bgr, params)[1]
-
-
-def obstacle_mask(bgr: np.ndarray, params: MaskParams) -> np.ndarray:
-    """Return walls and boxes together, as in Milestone 3.
-
-    Args:
-        bgr (np.ndarray): HxWx3 uint8 BGR image.
-        params (MaskParams): Thresholds to apply.
-
-    Returns:
-        np.ndarray: HxW uint8 mask, 255 on walls or boxes.
-    """
-    wall, box = split_masks(bgr, params)
-    return cv2.bitwise_or(wall, box)
