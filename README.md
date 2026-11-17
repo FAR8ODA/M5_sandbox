@@ -7,22 +7,24 @@ The car laps the track at 1.0–1.5 m/s, avoids static and moving obstacles, and
 Run each command in its own terminal on the car:
 
 1. Car stack (LiDAR, VESC, odometry)
+
 ```
 source ~/f1tenth_ws/install/setup.bash && ros2 launch f1tenth_stack bringup_launch.py
 ```
 
 2. Camera
+
 ```
 source ~/f1tenth_ws/install/setup.bash && ros2 launch realsense2_camera rs_launch.py
 ```
 
 3. Build and run Milestone 4
+
 ```
 cd ~/f1tenth_ws && colcon build --packages-select milestone4 && source install/setup.bash \
   && ros2 launch milestone4 milestone4_py.py num_laps:=3 min_lap_distance:=15.0
 ```
 
-- Hold the joystick's autonomous button, or `/drive` does not reach the motor.
 - Ctrl+C in terminal 3 stops the car: `safety_node` sends zero speed before it exits.
 - Watch the safety state with `ros2 topic echo /safety/state`.
 - Record a run for debugging: see [Debug topics](#debug-topics).
@@ -132,6 +134,7 @@ soft cap speed limited so that ttc ≥ 2 · T(v)
 - With `track_obstacles:=true`, an obstacle's own approach speed is added: scans are lined up using the car's own motion, so only real movement remains. It is off by default until it is validated on the car.
 
 Other safety behaviour:
+
 - **Latched stop**: only the lap counter's stop holds until restart. AEB is not latched: the car drives on once the path opens up.
 - **Watchdog**: the car brakes while drive requests or scans are stale.
 - **Fallback**: if the fused scan stops, safety and driving fall back to the raw `/scan`.
@@ -140,7 +143,8 @@ Other safety behaviour:
 ### Lap counting
 
 The lap counter compares the current view with the start:
-- **Camera**: a blurred L\*a\*b\* thumbnail.
+
+- **Camera**: a blurred Lab thumbnail.
 - **LiDAR**: a range profile, matched over ±10° of heading.
 - The two similarities are averaged.
 
@@ -161,14 +165,12 @@ A lap counts at the peak of the score, only after the car has left the start and
 ## Testing
 
 - **Unit and closed-loop tests** (`milestone4/test/`, 157 tests): the nodes' callbacks are called directly, with `test/ros_stubs.py` standing in for rclpy and the message types, so no ROS install is needed.
-
   ```bash
   cd milestone4/test
   python3 -m unittest test_braking test_fusion test_gap_follow test_safety test_lap_counter test_perception test_closed_loop test_params
   ```
 
   On the car or VM, `colcon test --packages-select milestone4 && colcon test-result --verbose` runs these plus the style checks.
-
   - Unit tests: the braking model, fusion rules, disparity extender, AEB cases and lap counting.
   - Parameter file (`test_params.py`): every value in `config/milestone4.yaml` is a parameter its node declares, with the right type, so a typo cannot be silently ignored.
   - Closed-loop simulation (`test/closed_loop.py`, also runnable on its own): all nodes together on a ray-cast track, covering:
@@ -178,6 +180,34 @@ A lap counts at the peak of the score, only after the car has left the start and
     - the lane blocked halfway round by two boxes side by side (gaps narrower than the car): the car stops in front of them and stays stopped;
     - LiDAR dropouts and scan lag;
     - a realistic car (steering delay and error, odometry and range noise) on 1.0–1.2 m tracks without false AEB.
+- **Simulator viewer** (`test/sim_viewer.py`): animates a closed-loop run so we can watch what the planner decided on every scan. Needs only `pip install matplotlib numpy`, no ROS.
+  ```bash
+  cd milestone4/test
+  python sim_viewer.py --boxes --realistic --speed 1.5
+  python sim_viewer.py --blocked --realistic --speed 1.5
+  ```
+
+  Each frame shows:
+  - the LiDAR scan (blue);
+  - the beams the disparity extender shortened (orange);
+  - the target beam (red);
+  - the car and its path (green);
+  - a panel with speed, steering, the gap to each wall and the safety mode.
+
+  The tests only report pass or fail; the viewer shows *why* the car did something. With it we could:
+  - see where the car cut a corner or ran close to a wall, and tune `deep_fraction` and `margin` from the command line (`--deep`, `--margin`) before changing the code;
+  - check that boxes are passed with room to spare at 1.5 m/s with the realistic car model (steering lag and error, LiDAR offset, noise);
+  - confirm that a blocked lane brings the car to a stop in AEB instead of squeezing through.
+
+  This let us find and fix driving problems before spending time on the track.
+
+  **Passing boxes at 1.5 m/s (realistic car):**
+
+  <img src="sim_boxes.png" alt="Simulator passing boxes" width="100%">
+
+  **Blocked lane: the car stops in AEB:**
+
+  <img src="sim_aeb.png" alt="Simulator stopping at a blocked lane" width="100%">
 - **Style**: flake8, pep257 and copyright checks, run by `colcon test`.
 - **On the car**:
   1. Empty laps, then static boxes, raising `max_speed` in steps.
@@ -222,7 +252,7 @@ Try a value with a launch argument (`a_brake:=2.4`), then write it into `config/
 
 ## Parameters and Launch Arguments
 
-Every parameter of every node is in **`milestone4/config/milestone4.yaml`**, the single place to tune the car. Values shared by several nodes (car geometry, the braking model, timeouts, camera mounting) sit once in its `/**` section, so the planner and the safety node can never use different braking models. Keep the decimal point on decimal values (`1.0`, not `1`): ROS parameters are typed.
+Every parameter of every node is in `milestone4/config/milestone4.yaml`, the single place to tune the car. Values shared by several nodes (car geometry, the braking model, timeouts, camera mounting) sit once in its `/**` section, so the planner and the safety node can never use different braking models. Keep the decimal point on decimal values (`1.0`, not `1`): ROS parameters are typed.
 
 Launch arguments override the file for one run, e.g. `max_speed:=1.25`. Tuning arguments not given on the command line leave the file's value. Use `params_file:=/path/to/copy.yaml` to launch with a different file.
 
