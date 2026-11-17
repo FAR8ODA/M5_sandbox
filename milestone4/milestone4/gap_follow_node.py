@@ -50,7 +50,7 @@ class GapFollowNode(Node):
         super().__init__('gap_follow_node')
 
         # Main tuning parameters (values in config/milestone4.yaml):
-        self.declare_parameter('max_speed', 1.0)
+        self.declare_parameter('max_speed', 1.5)
         self.declare_parameter('min_speed', 0.35)
         self.declare_parameter('pass_speed', 0.8)
         self.declare_parameter('gain', 1.0)

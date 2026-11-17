@@ -67,7 +67,7 @@ TUNING_ARGS: List[Tuple[str, str, Callable]] = [
 ]
 
 # Which node parameter each tuning argument sets: {node: {parameter: argument}}.
-# max_speed sets both the planner's top speed and the safety node's cap, so they never differ.
+# max_speed is both the planner's top speed and the safety node's cap, so they never differ.
 OVERRIDES: Dict[str, Dict[str, str]] = {
     'gap_follow_node': {
         'max_speed': 'max_speed', 'pass_speed': 'pass_speed', 'lookahead': 'lookahead',
@@ -76,7 +76,7 @@ OVERRIDES: Dict[str, Dict[str, str]] = {
         'ttc_margin': 'ttc_margin', 'stop_margin': 'stop_margin',
     },
     'safety_node': {
-        'drive_speed': 'max_speed', 'ttc_margin': 'ttc_margin', 'a_brake': 'a_brake',
+        'max_speed': 'max_speed', 'ttc_margin': 'ttc_margin', 'a_brake': 'a_brake',
         'stop_margin': 'stop_margin', 'track_obstacles': 'track_obstacles',
     },
     'lap_counter_node': {
@@ -137,9 +137,8 @@ def launch_nodes(context: LaunchContext) -> list:
     file's shared /** section, the node's own section, the sensor switches, then the
     command-line overrides. Passing the file and the overrides separately does not work:
     launch writes the overrides under /** (our nodes have no namespace), and ROS applies a
-    node's own section of the file after /**, so max_speed:=1.4 was replaced by the file's
-    drive_speed: 1.0 in safety_node (and likewise every argument whose value sits in a
-    node's own section).
+    node's own section of the file after /**, so an argument such as num_laps:=2 was
+    replaced by the value in the node's own section of the file.
 
     Args:
         context (LaunchContext): Launch context holding the argument values.

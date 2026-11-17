@@ -86,13 +86,14 @@ class TestLaunchParameters(unittest.TestCase):
         """Check max_speed sets the planner's speed and the safety cap."""
         nodes = self.nodes(max_speed='1.4')
         self.assertEqual(nodes['gap_follow_node']['max_speed'], 1.4)
-        self.assertEqual(nodes['safety_node']['drive_speed'], 1.4)
+        self.assertEqual(nodes['safety_node']['max_speed'], 1.4)
 
     def test_file_values_without_arguments(self):
         """Check the YAML values (own and shared sections) apply with no arguments."""
         nodes = self.nodes()
-        self.assertEqual(nodes['gap_follow_node']['max_speed'], 1.0)
-        self.assertEqual(nodes['safety_node']['drive_speed'], 1.0)
+        self.assertEqual(nodes['gap_follow_node']['max_speed'], 1.5)
+        self.assertEqual(nodes['safety_node']['max_speed'], 1.5)
+        self.assertEqual(nodes['gap_follow_node']['pass_speed'], 1.2)   # own section
         for node in ('gap_follow_node', 'safety_node'):
             self.assertEqual(nodes[node]['a_brake'], 2.0)      # the shared /** section
             self.assertEqual(nodes[node]['wheelbase'], 0.33)

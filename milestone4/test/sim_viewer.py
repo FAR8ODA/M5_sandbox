@@ -13,7 +13,7 @@ on every scan, then animates it:
 
 Setup (once):   pip install matplotlib numpy
 Examples (run from milestone4/test):
-    python sim_viewer.py                                # current code, ideal car, 1.0 m/s
+    python sim_viewer.py                                # current code, ideal car, 1.5 m/s
     python sim_viewer.py --realistic --speed 1.5        # car with steering lag/error, LiDAR offset
     python sim_viewer.py --realistic --deep 0.7         # aim further from the inner wall
     python sim_viewer.py --boxes --realistic --speed 1.5
@@ -201,7 +201,7 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--code', default=TEST_DIR,
                    help='milestone4/test folder to run (default: the folder of this script)')
-    p.add_argument('--speed', type=float, default=1.0, help='max_speed (m/s)')
+    p.add_argument('--speed', type=float, default=1.5, help='max_speed (m/s)')
     p.add_argument('--realistic', action='store_true',
                    help='steering lag/delay, steering 0.8x command, LiDAR 0.27 m ahead, noise')
     p.add_argument('--deep', type=float, default=None,

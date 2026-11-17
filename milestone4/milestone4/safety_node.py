@@ -216,7 +216,7 @@ class SafetyNode(Node):
     TTC_MARGIN = 0.1
 
     # Highest speed ever commanded (m/s).
-    DRIVE_SPEED = 1.0
+    MAX_SPEED = 1.5
 
     # Brake if drive requests or scans are older than this (seconds).
     STALE_TIMEOUT = 0.25
@@ -230,7 +230,7 @@ class SafetyNode(Node):
 
         # Values come from config/milestone4.yaml; the class constants are fallbacks.
         self.declare_parameter('ttc_margin', self.TTC_MARGIN)
-        self.declare_parameter('drive_speed', self.DRIVE_SPEED)
+        self.declare_parameter('max_speed', self.MAX_SPEED)
         self.declare_parameter('stale_timeout', self.STALE_TIMEOUT)
 
         # Braking model and corridor (tune a_brake from a measured stop: a = v^2 / (2 d)).
@@ -252,7 +252,7 @@ class SafetyNode(Node):
         # read the parameters once, clamped to sensible ranges
         p = self.get_parameter
         self.TTC_MARGIN = max(0.0, float(p('ttc_margin').value))
-        self.drive_speed = float(p('drive_speed').value)
+        self.max_speed = float(p('max_speed').value)
         self.stale_timeout = float(p('stale_timeout').value)
         self.A_BRAKE = max(0.1, float(p('a_brake').value))
         self.T_REACT = max(0.0, float(p('t_react').value))
@@ -669,8 +669,8 @@ class SafetyNode(Node):
 
         Args:
             msg (AckermannDriveStamped): Steering and speed request. A negative speed
-                requests a latched stop; zero leaves the speed at drive_speed; a positive
-                speed is used, never above drive_speed or the soft-stage cap.
+                requests a latched stop; zero leaves the speed at max_speed; a positive
+                speed is used, never above max_speed or the soft-stage cap.
         """
         try:
             self.handle_request(msg)
@@ -704,10 +704,10 @@ class SafetyNode(Node):
         if self.safety_mode == 'stale':
             self.safety_mode = 'normal'                 # inputs fresh again: resume
 
-        # requested speed, never above drive_speed (0 means drive_speed)
-        speed = self.drive_speed
+        # requested speed, never above max_speed (0 means max_speed)
+        speed = self.max_speed
         if msg.drive.speed > 0.0:
-            speed = min(self.drive_speed, msg.drive.speed)
+            speed = min(self.max_speed, msg.drive.speed)
 
         # hard stage: AEB if the car cannot stop in time on the requested path
         hard, cap = self.check_path(source, self.latest_steering_angle,

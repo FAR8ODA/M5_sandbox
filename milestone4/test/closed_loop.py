@@ -169,7 +169,7 @@ def box_labels(scan, box_centres, x, y, yaw, t, probability, rng, half_size=0.2)
     return ros_stubs.make_scan(out, t=t)
 
 
-def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
+def run(world, num_laps=2, max_speed=1.5, min_lap_distance=10.0, max_time=80.0,
         a_brake=2.0, accel=3.0, lidar_dropout=None, low_obstacles=None, use_camera=False,
         servo_lag=0.0, box_centres=None, label_probability=1.0, seed=1, scan_lag=None,
         steer_gain=1.0, steer_offset=0.0, lidar_offset=0.0, range_noise=0.0,
@@ -222,7 +222,7 @@ def run(world, num_laps=2, max_speed=1.0, min_lap_distance=10.0, max_time=80.0,
     ros_stubs.PARAM_OVERRIDES.update({
         'fusion_node': {'use_camera': use_camera, 'use_depth': use_camera},
         'gap_follow_node': {'max_speed': max_speed},
-        'safety_node': {'drive_speed': max_speed, 'a_brake': a_brake},
+        'safety_node': {'max_speed': max_speed, 'a_brake': a_brake},
         'lap_counter_node': {'use_camera': False, 'num_laps': num_laps,
                              'min_lap_distance': min_lap_distance},
     })

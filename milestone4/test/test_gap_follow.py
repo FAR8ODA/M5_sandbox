@@ -108,7 +108,7 @@ class GapFollowTest(unittest.TestCase):
         """Check a straight corridor gives straight steering at max_speed."""
         requests = self.drive_corridor(1.5)
         self.assertLess(abs(requests[-1].steering_angle), 0.02)
-        self.assertAlmostEqual(requests[-1].speed, 1.0, places=3)        # max_speed
+        self.assertAlmostEqual(requests[-1].speed, 1.5, places=3)        # max_speed
 
     def test_speed_ramps_up_at_a_accel(self):
         """Check the requested speed rises by at most a_accel per second."""
@@ -152,6 +152,7 @@ class GapFollowTest(unittest.TestCase):
         ranges = np.where(self.angles > math.radians(12.0), 4.0, 1.0)
         beside = np.abs(self.angles - math.radians(100.0)) < math.radians(2.0)
         speeds = []
+        ros_stubs.PARAM_OVERRIDES['gap_follow_node'] = {'max_speed': 1.0}
         for side in (3.0, 0.3):
             ros_stubs.CLOCK.seconds = 0.0
             node = GapFollowNode()
@@ -161,6 +162,7 @@ class GapFollowTest(unittest.TestCase):
             drive = node.publishers_by_topic['drive_request'].messages[-1].drive
             self.assertGreater(drive.steering_angle, 0.3)     # still turning left
             speeds.append(drive.speed)
+        ros_stubs.PARAM_OVERRIDES.clear()
         self.assertAlmostEqual(speeds[0], 1.0)                # nothing beside: the turn's speed
         wall = math.cos(math.asin(self.node.CORRIDOR))        # nearest wall point on the path
         self.assertAlmostEqual(speeds[1], self.node.braking_limit(wall), places=2)
@@ -174,8 +176,8 @@ class GapFollowTest(unittest.TestCase):
 
     def test_clear_straight_gives_max_speed(self):
         """Check a clear straight path gives max_speed."""
-        self.assertAlmostEqual(self.node.calculate_speed(math.inf, 0.0, False), 1.0)
-        self.assertAlmostEqual(self.node.calculate_speed(20.0, 0.0, False), 1.0)
+        self.assertAlmostEqual(self.node.calculate_speed(math.inf, 0.0, False), 1.5)
+        self.assertAlmostEqual(self.node.calculate_speed(20.0, 0.0, False), 1.5)
 
     def test_braking_limit(self):
         # keep plan_factor (2.5) x the TTC needed to stop for whatever is 1 m along the path
@@ -198,14 +200,14 @@ class GapFollowTest(unittest.TestCase):
         limit = math.sqrt(2.5 / curvature)                               # about 1.4 m/s
         self.assertAlmostEqual(self.node.cornering_limit(0.4), limit)
         self.assertAlmostEqual(self.node.cornering_limit(-0.4), limit)
-        # at the default 1.0 m/s top speed the corners are not the limit
-        self.assertAlmostEqual(self.node.calculate_speed(math.inf, 0.4, False), 1.0)
-        # with a faster top speed, full lock is
-        ros_stubs.PARAM_OVERRIDES['gap_follow_node'] = {'max_speed': 2.0}
-        fast = GapFollowNode()
+        # at the default 1.5 m/s top speed full lock is the limit, a gentle turn is not
+        self.assertAlmostEqual(self.node.calculate_speed(math.inf, 0.4, False), limit)
+        self.assertAlmostEqual(self.node.calculate_speed(math.inf, 0.1, False), 1.5)
+        # with a 1.0 m/s top speed the corners are never the limit
+        ros_stubs.PARAM_OVERRIDES['gap_follow_node'] = {'max_speed': 1.0}
+        slow = GapFollowNode()
         ros_stubs.PARAM_OVERRIDES.clear()
-        self.assertAlmostEqual(fast.calculate_speed(math.inf, 0.4, False), limit)
-        self.assertAlmostEqual(fast.calculate_speed(math.inf, 0.1, False), 2.0)  # gentle
+        self.assertAlmostEqual(slow.calculate_speed(math.inf, 0.4, False), 1.0)
 
     def test_box_pass_cap(self):
         """Check passing a box caps the speed at pass_speed."""
