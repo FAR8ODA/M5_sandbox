@@ -223,13 +223,15 @@ A lap counts at the peak of the score, only after the car has left the start and
 
 On early track runs, the car cut an inside corner far enough to trigger AEB, and the steering twitched with smoothing set to `0.3`. We moved the pure-pursuit reference to the rear axle and increased smoothing to `0.6`. We also saw LiDAR scans arrive up to 0.4 s late when the camera started on the Jetson. We reproduced that delay in a simulator test to check how the safety node handled it.
 
+In early runs, the car hugged the left wall. We added LiDAR-based lane centring (centre_gain = 2.0). In the 50 cm-wide strip ahead, returns within 10 cm of a fitted side wall are treated as wall returns, so the centring correction stays active near the wall.
+
 | Track test | Run settings | Observed result |
 |---|---|---|
-| Three laps on a clear track | `[speed cap]` m/s, camera `[on/off]` | The car completed `[laps driven]` laps, counted `[laps reported]`, and `[stopped after the final lap / describe what happened]`. |
-| Static box pass | `[speed cap]` m/s, box on `[straight/corner]` | The car `[passed/stopped/made contact]`. `/obstacle_scan` `[marked the box / result if checked]`. |
-| Box blocking the lane | `[speed cap]` m/s | AEB `[engaged/did not engage]`. The car `[stopped with ___ cm between the front bumper and the box / describe what happened]`. |
-| Box moving toward the car | `[speed cap]` m/s, obstacle tracking `[on/off]` | The car `[slowed/stopped/steered around it / describe what happened]`. `[Record any contact or measured clearance.]` |
-| LiDAR-only run | `[speed cap]` m/s, `use_camera:=false` | The car `[completed ___ laps / describe where it stopped]`. |
+| Three laps on a clear track | `[speed cap]` m/s, camera `[on/off]` | The car completed 3 full laps, and stopped immediately after finishing the third lap (about 2-5cm after). |
+| Static box pass | `[speed cap]` m/s, box on `[straight/corner]` | The car passed the obstsacle(s) without making contact while lowering speed. |
+| Box blocking the lane | `[speed cap]` m/s | AEB properly engaged. The car stopped within 10cm behind the start line after the alloted laps. |
+| Box moving toward the car | `[speed cap]` m/s, obstacle tracking `[on/off]` | The car slowed down and steered around the boxes while continueing around the track. No contact was measured in final testing |
+| LiDAR-only run | `[speed cap]` m/s, `use_camera:=false` | The car completed 5 laps using only LiDAR. |
 
 ## Tuning on the Track
 
