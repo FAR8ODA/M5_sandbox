@@ -1,4 +1,4 @@
-# CPEN 391 Milestone 4 (Group B4): LiDAR and Camera Fusion
+# CPEN 391 Milestone 4 (Group B4): Driving Improvement - LiDAR and Camera Fusion
 
 
 ## Project Overview 
@@ -225,6 +225,7 @@ On early track runs, the car cut an inside corner far enough to trigger AEB, and
 
 In early runs, the car hugged the left wall. We added LiDAR-based lane centring (centre_gain = 2.0). In the 50 cm-wide strip ahead, returns within 10 cm of a fitted side wall are treated as wall returns, so the centring correction stays active near the wall.
 
+
 | Track test | Run settings | Observed result |
 |---|---|---|
 | Three laps on a clear track | `[speed cap]` m/s, camera `[on/off]` | The car completed 3 full laps, and stopped immediately after finishing the third lap (about 2-5cm after). |
@@ -232,6 +233,8 @@ In early runs, the car hugged the left wall. We added LiDAR-based lane centring 
 | Box blocking the lane | `[speed cap]` m/s | AEB properly engaged. The car stopped within 10cm behind the start line after the alloted laps. |
 | Box moving toward the car | `[speed cap]` m/s, obstacle tracking `[on/off]` | The car slowed down and steered around the boxes while continueing around the track. No contact was measured in final testing |
 | LiDAR-only run | `[speed cap]` m/s, `use_camera:=false` | The car completed 5 laps using only LiDAR. |
+
+For the demo, we set max_speed to 2.6 m/s, up from the package default of 1.5 m/s. In track testing, that setting gave us our quickest 3 lap time at 54.4 s, compared with 60.8 s at 2.3 m/s and 58.1 s at 3.0 m/s.
 
 ## Tuning on the Track
 
