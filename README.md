@@ -1,4 +1,4 @@
-# CPEN 391 Milestone4 - B4: Improved Driving and Safety
+# CPEN 391 Milestone 4 - B4: Improved Driving and Safety
 
 
 ## Project Overview 
