@@ -235,6 +235,7 @@ In early runs, the car hugged the left wall. We added LiDAR-based lane centring 
 | Box moving toward the car | `[speed cap]` m/s, obstacle tracking `[on/off]` | The car slowed down and steered around the boxes while continueing around the track. No contact was measured in final testing |
 | LiDAR-only run | `[speed cap]` m/s, `use_camera:=false` | The car completed 5 laps using only LiDAR. |
 
+For the demo, we set max_speed to 2.6 m/s, up from the package default of 1.5 m/s. In track testing, that setting gave us our quickest 3 lap time at 54.4 s any change comparatively increased the total time by more than 2 seconds.
 
 ## Tuning on the Track
 
