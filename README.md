@@ -1,4 +1,4 @@
-# CPEN 391 Milestone 4 (Group B4): LiDAR and Camera Fusion
+# CPEN 391 Milestone4 - B4: Improved Driving and Safety
 
 
 ## Project Overview 
