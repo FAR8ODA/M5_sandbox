@@ -136,6 +136,11 @@ class GapFollowNode(Node):
         self.SIDE_MIN_RANGE = float(p('side_min_range').value)  # nearer: the car itself (m)
         self.CENTRE_GAIN = float(p('centre_gain').value)     # 0-1: follow the lane's middle
         self.LANE_MAX = 1.5                                  # a side farther away is open (m)
+        # nearer a side wall than this, pull back to the middle harder: the same clearance the
+        # disparity extender keeps at edges (half the car plus margin) (m)
+        self.WALL_KEEP = self.CAR_HALF_WIDTH + self.MARGIN
+        self.TRIM_RATE = 0.1                                 # trim learning rate (rad per m per s)
+        self.MAX_TRIM = 0.08                                 # largest learned trim (rad)
 
         # Speed parameters:
 
@@ -164,6 +169,8 @@ class GapFollowNode(Node):
         self.measured_speed = 0.0       # speed from odometry (m/s), sets the lookahead
         self.odom_time: Time | None = None         # when odometry last arrived
         self.target_angle = 0.0         # bearing of the last target (rad)
+        self.trim = 0.0                 # learned steering trim: cancels the servo's pull (rad)
+        self.trim_time: Time | None = None         # when the trim was last updated
         self.label_history: deque = deque(maxlen=3)  # recent raw box labels (per beam)
         self.box_until: np.ndarray | None = None   # per beam: box label held until (s)
         self.pass_until = -math.inf     # stay in passing mode until this time (s)
@@ -414,7 +421,7 @@ class GapFollowNode(Node):
     # [ Step 4 ] steering
 
     def lane_centre(self, ranges: np.ndarray,
-                    angles: np.ndarray) -> tuple[float, float] | None:
+                    angles: np.ndarray) -> tuple[float, float, float] | None:
         """
         Find the middle line of the lane between the walls beside the car, on a clear straight.
 
@@ -428,10 +435,11 @@ class GapFollowNode(Node):
             angles: angle of each beam (rad)
 
         Returns:
-            (offset, slope): the middle line y = offset + slope x (m, left positive, from
-            the LiDAR); None unless there is a wall within LANE_MAX on both sides (beams 45
-            to 100 degrees each side) and nothing nearer than the range cap in the 0.5 m
-            wide strip straight ahead: near a box or a turn the gap target decides alone.
+            (offset, slope, wall): the middle line y = offset + slope x (m, left positive,
+            from the LiDAR) and the distance to the nearer side wall (m); None unless
+            there is a wall within LANE_MAX on both sides (beams 45 to 100 degrees each
+            side) and nothing nearer than the range cap in the 0.5 m wide strip straight
+            ahead: near a box or a turn the gap target decides alone.
             The side walls themselves do not count as being in that strip (a point within
             0.1 m of a wall's line is that wall): close to a wall and angled a little
             towards it, the wall entered the strip and switched the centring off exactly
@@ -464,10 +472,10 @@ class GapFollowNode(Node):
         if np.any(np.abs(y) < wall_y - 0.10):           # something in the lane, not a wall
             return None
         # left wall at +(left + left_slope x), right wall at -(right + right_slope x)
-        return 0.5 * (left - right), 0.5 * (left_slope - right_slope)
+        return 0.5 * (left - right), 0.5 * (left_slope - right_slope), min(left, right)
 
     def calculate_steering_angle(self, angle: float, distance: float,
-                                 centre: tuple[float, float] | None = None) -> float:
+                                 centre: tuple[float, float, float] | None = None) -> float:
         """
         Steer towards a point on the target beam with pure pursuit, then clamp and smooth it.
 
@@ -483,7 +491,9 @@ class GapFollowNode(Node):
             distance: range of the target (m)
             centre: the lane's middle line from lane_centre(), or None. On a clear
                 straight the goal point moves (CENTRE_GAIN of the way, at most all of it)
-                onto that line, so the car holds the middle of the straight
+                onto that line, so the car holds the middle of the straight. Nearer a wall
+                than WALL_KEEP the lookahead shortens, pulling back harder; and while the
+                car sits off the middle, a steering trim is learned (see update_trim)
 
         Returns:
             steering_angle: steering angle in radians (positive is left)
@@ -499,15 +509,20 @@ class GapFollowNode(Node):
         # on a clear straight: the middle line of the lane, ld ahead (the strip ahead is
         # clear, so the goal may be farther than the capped target)
         if centre is not None and self.CENTRE_GAIN > 0.0:
+            offset, slope, wall = centre
+            self.update_trim(offset)
+            # too near a wall: a shorter lookahead turns back to the middle sooner
+            if wall < self.WALL_KEEP:
+                ld = max(self.MIN_LOOKAHEAD, ld * max(0.5, wall / self.WALL_KEEP))
             weight = min(self.CENTRE_GAIN, 1.0)
             gx += weight * (ld - gx)
-            gy += weight * (centre[0] + centre[1] * ld - gy)
+            gy += weight * (offset + slope * ld - gy)
 
         # pure pursuit: curvature 2 y / L^2 (Coulter 1992), as in Milestone 3, but from the
         # rear axle, which the car turns about; the LiDAR is LIDAR_X ahead of it
         gx += self.LIDAR_X
         curvature = 2.0 * gy / (gx * gx + gy * gy)
-        steering = math.atan(self.WHEELBASE * curvature) * self.STEERING_GAIN
+        steering = math.atan(self.WHEELBASE * curvature) * self.STEERING_GAIN + self.trim
 
         # clamp to the car's steering range
         steering = max(-self.MAX_STEERING, min(self.MAX_STEERING, steering))
@@ -516,6 +531,29 @@ class GapFollowNode(Node):
         steering = self.SMOOTHING * self.previous_steering + (1.0 - self.SMOOTHING) * steering
         self.previous_steering = steering
         return steering
+
+    def update_trim(self, offset: float) -> None:
+        """
+        Learn the steering trim that cancels a servo pulling to one side.
+
+        Pure pursuit steers only as much as the goal is off the car's axis, so a servo that
+        pulls to one side leaves the car riding off the middle of a straight until that
+        offset cancels the pull. The longer the lookahead (faster), the bigger the offset:
+        about 0.25 m at 2.6 m/s for a 0.03 rad pull, which put the car against the wall and
+        stopped it in the simulator. On clear straights, at speed, the trim moves towards
+        the middle at TRIM_RATE per metre off it (an integral term), up to MAX_TRIM.
+
+        Args:
+            offset: how far the lane's middle is to the left of the LiDAR (m)
+        """
+        now = self.get_clock().now()
+        dt = 0.0 if self.trim_time is None else min(max(seconds_since(self, self.trim_time),
+                                                         0.0), 0.1)
+        self.trim_time = now
+        if self.lookahead_speed() < 0.5:
+            return                      # slow or stopped: the offset says little about the servo
+        self.trim = max(-self.MAX_TRIM, min(self.MAX_TRIM,
+                                            self.trim + self.TRIM_RATE * offset * dt))
 
     def corner_check(self, steering: float, beside: float) -> float:
         """
