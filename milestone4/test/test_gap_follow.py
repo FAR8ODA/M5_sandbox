@@ -144,8 +144,8 @@ class GapFollowTest(unittest.TestCase):
 
     def test_slows_for_the_straight_path_when_the_turn_may_be_cancelled(self) -> None:
         # a wall 1 m ahead and to the right, open to the left, and the car already turning
-        # hard left at 1 m/s: the turn's own path is free. With something 0.3 m beside the
-        # car on the left (nearer than side_clear + 0.15 m), corner_check may cancel the turn
+        # hard left at 1 m/s: the turn's own path is free. With something 0.27 m beside the
+        # car on the left (nearer than side_clear + 0.05 m), corner_check may cancel the turn
         # on the next scan, so the speed must already suit the straight path into the wall.
         # (It was the turn's speed, and AEB fired the moment the turn was cancelled.)
         """Check the speed suits the straight path when the turn may be cancelled."""
@@ -153,7 +153,7 @@ class GapFollowTest(unittest.TestCase):
         beside = np.abs(self.angles - math.radians(100.0)) < math.radians(2.0)
         speeds = []
         ros_stubs.PARAM_OVERRIDES['gap_follow_node'] = {'max_speed': 1.0}
-        for side in (3.0, 0.3):
+        for side in (3.0, 0.27):
             ros_stubs.CLOCK.seconds = 0.0
             node = GapFollowNode()
             node.previous_speed, node.previous_steering = 1.0, 0.4

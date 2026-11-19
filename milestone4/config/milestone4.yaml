@@ -48,8 +48,12 @@ gap_follow_node:
     # and cornering limits already slow it where needed.
     pass_speed: 1.2
     a_lat: 2.5 # sideways grip for the cornering limit (m/s^2)
-    a_accel: 2.0 # how fast the requested speed may rise (m/s^2)
-    plan_factor: 2.5 # planner keeps TTC >= this x the TTC needed to stop
+    a_accel: 3.0 # how fast the requested speed may rise (m/s^2); 2.0 left the straights
+    # half used: the car was still accelerating when it had to brake for the turn
+    # planner keeps TTC >= this x the TTC needed to stop (keep above safety slow_factor).
+    # 2.5 planned to brake at a_brake / 2.5 = 0.8 m/s^2, so at 2.4 m/s it slowed 5 m
+    # before the wall at the end of a straight and never reached max_speed
+    plan_factor: 1.6
     box_slow_range: 1.5 # a confirmed box nearer than this starts a pass (m)
     box_hold: 0.3 # keep a box label this long after it was last seen (s)
     pass_hold: 0.5 # keep passing this long after the last box ahead (s)
@@ -65,7 +69,7 @@ gap_follow_node:
 
     # Steering (pure pursuit)
     gain: 1.0 # steering gain
-    lookahead: 2.0 # longest lookahead (m)
+    lookahead: 2.5 # longest lookahead (m); longer = calmer at speed on the straights
     min_lookahead: 0.5 # shortest lookahead (m)
     lookahead_time: 0.8 # lookahead = speed x this, between the two limits (s)
     lidar_x: 0.27 # LiDAR distance ahead of the rear axle (m)
@@ -75,12 +79,12 @@ gap_follow_node:
     side_max_angle_deg: 120.0 # side check ends at this bearing (degrees)
     side_min_range: 0.10 # nearer side readings are the car itself (m)
     side_clear: 0.25 # go straight if the turning side is nearer (m)
-    centre_gain: 2.0 # pull towards the middle between the side walls (0 = off)
+    centre_gain: 1.0 # on a clear straight, aim at the lane's middle line (1) or the gap (0)
 
 safety_node:
   ros__parameters:
     stale_timeout: 0.25 # brake when requests or scans are older (s)
-    slow_factor: 2.0 # soft stage keeps TTC >= this x the TTC needed to stop
+    slow_factor: 1.4 # soft stage keeps TTC >= this x the TTC needed to stop (AEB at 1.0)
     min_closing: 0.1 # slower closing speeds never trigger AEB (m/s)
 
     # Moving obstacles

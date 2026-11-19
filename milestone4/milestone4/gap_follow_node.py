@@ -81,7 +81,7 @@ class GapFollowNode(Node):
         self.declare_parameter('side_max_angle_deg', 120.0)
         self.declare_parameter('side_min_range', 0.10)
         self.declare_parameter('side_clear', 0.25)
-        self.declare_parameter('centre_gain', 2.0)
+        self.declare_parameter('centre_gain', 1.0)
 
         # Speed parameters:
         self.declare_parameter('a_lat', 2.5)
@@ -128,10 +128,13 @@ class GapFollowNode(Node):
         self.SMOOTHING = float(p('smoothing').value)
         self.SIDE_ANGLE = math.radians(float(p('side_angle_deg').value))  # side region starts here
         self.SIDE_CLEAR = float(p('side_clear').value)       # nearer beside us: no turn (m)
-        self.SIDE_WARN = 0.15                                # this much earlier: slow down (m)
+        # this much earlier: slow down for the straight path too. 0.15 m covered the line the
+        # car normally holds in corners (about 0.35 m off the inner wall), so it braked for
+        # the outer wall through every corner (2.5 s a lap in the simulator)
+        self.SIDE_WARN = 0.05
         self.SIDE_MAX_ANGLE = math.radians(float(p('side_max_angle_deg').value))  # region end
         self.SIDE_MIN_RANGE = float(p('side_min_range').value)  # nearer: the car itself (m)
-        self.CENTRE_GAIN = float(p('centre_gain').value)     # pull to the middle of the lane
+        self.CENTRE_GAIN = float(p('centre_gain').value)     # 0-1: follow the lane's middle
         self.LANE_MAX = 1.5                                  # a side farther away is open (m)
 
         # Speed parameters:
@@ -410,25 +413,29 @@ class GapFollowNode(Node):
 
     # [ Step 4 ] steering
 
-    def lane_offset(self, ranges: np.ndarray, angles: np.ndarray) -> float:
+    def lane_centre(self, ranges: np.ndarray,
+                    angles: np.ndarray) -> tuple[float, float] | None:
         """
-        Measure how far the middle of the lane, between the walls beside the car, is to its left.
+        Find the middle line of the lane between the walls beside the car, on a clear straight.
 
-        The gap target alone pulls the car to the middle only weakly, so a small steering
-        pull (servo trim) kept it riding along one wall on the straights.
+        Each side wall is fitted with a line, so the middle line carries both where the
+        middle is (how far left) and which way the lane runs (its slope). Aiming at a point
+        on it, rather than only pulling the car sideways, also turns the car parallel to the
+        walls, so it settles on the middle instead of crossing it and correcting back.
 
         Args:
             ranges: cleaned ranges (0.0 = invalid)
             angles: angle of each beam (rad)
 
         Returns:
-            offset: metres, left positive; 0.0 unless there is a wall within LANE_MAX on
-            both sides (beams 45 to 100 degrees each side) and nothing nearer than the
-            range cap in the 0.5 m wide strip straight ahead: near a box or a turn the gap
-            target decides alone. The side walls themselves do not count as being in that
-            strip (a point within 0.1 m of a wall's line is that wall): close to a wall and
-            angled a little towards it, the wall entered the strip and switched the
-            centring off exactly when it was needed (seen in the car's bag).
+            (offset, slope): the middle line y = offset + slope x (m, left positive, from
+            the LiDAR); None unless there is a wall within LANE_MAX on both sides (beams 45
+            to 100 degrees each side) and nothing nearer than the range cap in the 0.5 m
+            wide strip straight ahead: near a box or a turn the gap target decides alone.
+            The side walls themselves do not count as being in that strip (a point within
+            0.1 m of a wall's line is that wall): close to a wall and angled a little
+            towards it, the wall entered the strip and switched the centring off exactly
+            when it was needed (seen in the car's bag).
         """
         # fit a line to each side wall (left, then right); give up if a side has no wall
         walls = []
@@ -440,25 +447,27 @@ class GapFollowNode(Node):
             y = np.abs(ranges[beside] * np.sin(angles[beside]))
             near = y < self.LANE_MAX
             if np.count_nonzero(near) < 10:
-                return 0.0
-            x, y = x[near], y[near]
-            slope, lateral = np.polyfit(x, y, 1)        # the wall's line: y = lateral + slope x
-            walls.append((lateral, slope, float(np.percentile(y, 20))))
+                return None
+            slope, lateral = np.polyfit(x[near], y[near], 1)   # wall: y = lateral + slope x
+            walls.append((float(lateral), float(slope)))
+        (left, left_slope), (right, right_slope) = walls
+        # the walls run the same way (within 30 degrees): otherwise it is not a straight
+        if abs(math.atan(left_slope) + math.atan(right_slope)) > math.radians(30.0):
+            return None
         # points in the 0.5 m wide strip ahead of the car
         ahead = (np.abs(angles) < math.pi / 2) & (ranges > 0.0) & (ranges < 0.95 * self.MAX_RANGE)
         x = ranges[ahead] * np.cos(angles[ahead])
         y = ranges[ahead] * np.sin(angles[ahead])
         strip = np.abs(y) < 0.25
         x, y = x[strip], y[strip]
-        (left, left_slope, left_gap), (right, right_slope, right_gap) = walls
         wall_y = np.where(y >= 0.0, left + left_slope * x, right + right_slope * x)
         if np.any(np.abs(y) < wall_y - 0.10):           # something in the lane, not a wall
-            return 0.0
-        # lane clear: half the difference between the left and right wall distances
-        return 0.5 * (left_gap - right_gap)
+            return None
+        # left wall at +(left + left_slope x), right wall at -(right + right_slope x)
+        return 0.5 * (left - right), 0.5 * (left_slope - right_slope)
 
     def calculate_steering_angle(self, angle: float, distance: float,
-                                 lane_offset: float = 0.0) -> float:
+                                 centre: tuple[float, float] | None = None) -> float:
         """
         Steer towards a point on the target beam with pure pursuit, then clamp and smooth it.
 
@@ -472,20 +481,31 @@ class GapFollowNode(Node):
         Args:
             angle: bearing of the target (rad, positive is left)
             distance: range of the target (m)
-            lane_offset: from lane_offset(); the goal point is moved sideways by
-                CENTRE_GAIN times this, towards the middle of the lane
+            centre: the lane's middle line from lane_centre(), or None. On a clear
+                straight the goal point moves (CENTRE_GAIN of the way, at most all of it)
+                onto that line, so the car holds the middle of the straight
 
         Returns:
             steering_angle: steering angle in radians (positive is left)
         """
-        # goal point: ld along the target beam, from the LiDAR
-        ld = min(distance, self.LOOKAHEAD_TIME * self.lookahead_speed(), self.LOOKAHEAD)
-        ld = max(ld, self.MIN_LOOKAHEAD)
+        # lookahead: LOOKAHEAD_TIME seconds ahead at the measured speed
+        ld = max(self.MIN_LOOKAHEAD, min(self.LOOKAHEAD_TIME * self.lookahead_speed(),
+                                         self.LOOKAHEAD))
+
+        # goal point: on the target beam, no farther than the target, from the LiDAR
+        gd = max(self.MIN_LOOKAHEAD, min(distance, ld))
+        gx, gy = gd * math.cos(angle), gd * math.sin(angle)
+
+        # on a clear straight: the middle line of the lane, ld ahead (the strip ahead is
+        # clear, so the goal may be farther than the capped target)
+        if centre is not None and self.CENTRE_GAIN > 0.0:
+            weight = min(self.CENTRE_GAIN, 1.0)
+            gx += weight * (ld - gx)
+            gy += weight * (centre[0] + centre[1] * ld - gy)
 
         # pure pursuit: curvature 2 y / L^2 (Coulter 1992), as in Milestone 3, but from the
         # rear axle, which the car turns about; the LiDAR is LIDAR_X ahead of it
-        gx = ld * math.cos(angle) + self.LIDAR_X
-        gy = ld * math.sin(angle) + self.CENTRE_GAIN * lane_offset
+        gx += self.LIDAR_X
         curvature = 2.0 * gy / (gx * gx + gy * gy)
         steering = math.atan(self.WHEELBASE * curvature) * self.STEERING_GAIN
 
@@ -705,7 +725,7 @@ class GapFollowNode(Node):
             if index is None:
                 return          # no gap: nothing is published, and the safety watchdog brakes
             wanted_steering = self.calculate_steering_angle(
-                float(angles[index]), float(extended[index]), self.lane_offset(ranges, angles))
+                float(angles[index]), float(extended[index]), self.lane_centre(ranges, angles))
             beside = self.side_distance(ranges, angles, wanted_steering)
             steering = self.corner_check(wanted_steering, beside)
 
