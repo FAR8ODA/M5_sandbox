@@ -24,7 +24,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 
 
 class MotionTracker:
@@ -224,6 +224,11 @@ class SafetyNode(Node):
     # How often the watchdog checks the inputs (seconds).
     WATCHDOG_PERIOD = 0.05
 
+    # The planner's steering trim counts only this long after it arrived (seconds), and
+    # never more than MAX_TRIM (rad; the planner itself learns at most 0.08 rad).
+    TRIM_TIMEOUT = 0.5
+    MAX_TRIM = 0.1
+
     def __init__(self) -> None:
         """Initialize parameters, ROS communication, safety state and the watchdog."""
         super().__init__('safety_node')
@@ -300,6 +305,11 @@ class SafetyNode(Node):
         # forward speed (remapped to /odom on the car)
         self.create_subscription(Odometry, 'ego_racecar/odom', self.odom_callback, 10)
 
+        # the planner's learned steering trim: command - trim is what the car really steers
+        self.trim = 0.0
+        self.trim_time: Time | None = None
+        self.create_subscription(Float32, 'steering_trim', self.trim_callback, 10)
+
         # requests from the gap-follow node and the lap counter
         self.create_subscription(AckermannDriveStamped, 'drive_request',
                                  self.drive_request_callback, 10)
@@ -322,6 +332,33 @@ class SafetyNode(Node):
         self.current_yaw_rate = self.yaw_rate()
         self.advance_pose(self.current_speed, self.current_yaw_rate,
                           self.msg_time(msg.header.stamp))
+
+    def trim_callback(self, msg: Float32) -> None:
+        """
+        Store the planner's learned steering trim (clamped to +-MAX_TRIM).
+
+        Args:
+            msg (Float32): Trim (rad).
+        """
+        if math.isfinite(msg.data):
+            self.trim = max(-self.MAX_TRIM, min(self.MAX_TRIM, float(msg.data)))
+            self.trim_time = self.get_clock().now()
+
+    def path_steering(self) -> float:
+        """
+        Return the steering the car really drives with: the command minus the planner's trim.
+
+        The trim only cancels the servo's pull to one side. Checking the commanded arc
+        instead made a straight look like an arc into the wall (0.05 rad of trim: the wall
+        2.3 m ahead), and the soft stage held the car at 2.0 m/s. Without a recent trim the
+        command itself is used.
+
+        Returns:
+            float: Steering angle (rad, left positive).
+        """
+        if seconds_since(self, self.trim_time) <= self.TRIM_TIMEOUT:
+            return self.latest_steering_angle - self.trim
+        return self.latest_steering_angle
 
     def measured_speed(self) -> float:
         """
@@ -346,7 +383,7 @@ class SafetyNode(Node):
         Returns:
             float: speed * tan(commanded steering) / wheelbase (rad/s, left positive).
         """
-        return self.measured_speed() * math.tan(self.latest_steering_angle) / self.WHEELBASE
+        return self.measured_speed() * math.tan(self.path_steering()) / self.WHEELBASE
 
     def msg_time(self, stamp) -> float:
         """
@@ -483,7 +520,7 @@ class SafetyNode(Node):
             # only the scan in use can trigger AEB
             if self.is_latched() or self.active_source() is not source:
                 return
-            hard = self.check_path(source, self.latest_steering_angle, self.measured_speed())[0]
+            hard = self.check_path(source, self.path_steering(), self.measured_speed())[0]
             if hard:
                 self.engage_aeb()
 
@@ -710,8 +747,7 @@ class SafetyNode(Node):
             speed = min(self.max_speed, msg.drive.speed)
 
         # hard stage: AEB if the car cannot stop in time on the requested path
-        hard, cap = self.check_path(source, self.latest_steering_angle,
-                                    self.measured_speed())[:2]
+        hard, cap = self.check_path(source, self.path_steering(), self.measured_speed())[:2]
         if hard:
             self.engage_aeb()
             return

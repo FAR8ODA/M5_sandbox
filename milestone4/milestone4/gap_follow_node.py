@@ -21,6 +21,7 @@ import numpy as np
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Float32
 
 
 # Disparity Extender (UNC Chapel Hill, F1TENTH CPSWeek 2019; lecture slides 23-30)
@@ -186,6 +187,8 @@ class GapFollowNode(Node):
         self.create_subscription(LaserScan, 'scan', self.raw_callback, 10)
         self.create_subscription(LaserScan, 'obstacle_scan', self.obstacle_callback, 10)
         self.create_subscription(Odometry, 'ego_racecar/odom', self.odom_callback, 10)
+        # the learned trim, so the safety node checks the path the car really drives
+        self.trim_publisher = self.create_publisher(Float32, 'steering_trim', 10)
 
     # Inputs
 
@@ -567,11 +570,12 @@ class GapFollowNode(Node):
             beside: nearest reading on the turning side, from side_distance() (m)
 
         Returns:
-            steering: unchanged, or 0.0 if the turning side is nearer than SIDE_CLEAR
+            steering: unchanged, or the trim (really straight) if the turning side is nearer
+            than SIDE_CLEAR
         """
         if beside < self.SIDE_CLEAR:
-            self.previous_steering = 0.0
-            return 0.0
+            self.previous_steering = self.trim
+            return self.trim
         return steering
 
     def side_distance(self, ranges: np.ndarray, angles: np.ndarray, steering: float) -> float:
@@ -764,19 +768,25 @@ class GapFollowNode(Node):
                 return          # no gap: nothing is published, and the safety watchdog brakes
             wanted_steering = self.calculate_steering_angle(
                 float(angles[index]), float(extended[index]), self.lane_centre(ranges, angles))
-            beside = self.side_distance(ranges, angles, wanted_steering)
+            # the trim only cancels the servo's pull: the car really steers command - trim,
+            # and that is the path to check. With the command itself, a straight driven with
+            # 0.05 rad of trim looked like an arc into the wall 2.3 m ahead, which held the
+            # car (and the safety node) at 2.0 m/s on every straight after the first
+            beside = self.side_distance(ranges, angles, wanted_steering - self.trim)
             steering = self.corner_check(wanted_steering, beside)
+            actual = steering - self.trim
 
             # d. choose the speed and publish
             passing = self.box_ahead(ranges, angles, boxes)
-            free = self.path_clearance(msg, angles, steering)
+            free = self.path_clearance(msg, angles, actual)
             # the turning side is nearly close enough for corner_check to cancel the turn:
             # the straight path it would switch to must be safe at this speed as well
             if beside < self.SIDE_CLEAR + self.SIDE_WARN:
                 free = min(free, self.path_clearance(msg, angles, 0.0))
-            speed = self.ramp(self.calculate_speed(free, steering, passing))
+            speed = self.ramp(self.calculate_speed(free, actual, passing))
             self.previous_speed = speed
             self.publish_drive(steering, speed)
+            self.trim_publisher.publish(Float32(data=float(self.trim)))
 
         # error logging (once: the watchdog stops the car if no requests follow)
         except Exception as exc:
