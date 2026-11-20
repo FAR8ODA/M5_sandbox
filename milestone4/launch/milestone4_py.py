@@ -50,6 +50,8 @@ TUNING_ARGS: List[Tuple[str, str, Callable]] = [
     ('smoothing', 'Weight of the previous steering command (0-1).', float),
     ('deep_fraction', 'Beams this close to the deepest count as the gap (0-1).', float),
     ('lidar_x', 'LiDAR distance ahead of the rear axle, for pure pursuit (m).', float),
+    ('overtake_time', 'Look this far ahead (s) to change lane early; 0 = off.', float),
+    ('pass_margin', 'Clearance kept while overtaking (m).', float),
     # Safety (the braking model is shared by gap_follow_node and safety_node)
     ('ttc_margin', 'Extra time added to the variable TTC threshold (s).', float),
     ('a_brake', 'Measured braking deceleration (m/s^2).', float),
@@ -73,6 +75,7 @@ OVERRIDES: Dict[str, Dict[str, str]] = {
         'max_speed': 'max_speed', 'pass_speed': 'pass_speed', 'lookahead': 'lookahead',
         'gain': 'gain', 'a_lat': 'a_lat', 'margin': 'margin', 'smoothing': 'smoothing',
         'deep_fraction': 'deep_fraction', 'lidar_x': 'lidar_x', 'a_brake': 'a_brake',
+        'overtake_time': 'overtake_time', 'pass_margin': 'pass_margin',
         'ttc_margin': 'ttc_margin', 'stop_margin': 'stop_margin',
     },
     'safety_node': {

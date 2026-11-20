@@ -64,6 +64,8 @@ class GapFollowNode(Node):
         self.declare_parameter('car_half_width', 0.15)
         self.declare_parameter('margin', 0.20)
         self.declare_parameter('box_margin', 0.25)
+        self.declare_parameter('pass_margin', 0.17)
+        self.declare_parameter('overtake_time', 1.5)
         # 0.95 aims at the sliver of beams just past an inner corner, so the car rides about
         # half the car plus margin from the inner wall. Lower values (0.7) move it 6-7 cm out in
         # the closed-loop simulator, but when the view ahead is short they also count a nearby
@@ -111,6 +113,9 @@ class GapFollowNode(Node):
         self.CAR_HALF_WIDTH = float(p('car_half_width').value)  # half the car's width (m)
         self.MARGIN = float(p('margin').value)               # clearance at a disparity (m)
         self.BOX_MARGIN = float(p('box_margin').value)       # clearance at a confirmed box (m)
+        self.PASS_MARGIN = float(p('pass_margin').value)     # clearance while overtaking (m)
+        self.OVERTAKE_TIME = float(p('overtake_time').value)  # look this far ahead (s); 0 = off
+        self.OVERTAKE_MAX = 5.0                              # but never farther than this (m)
         self.DEEP_FRACTION = float(p('deep_fraction').value)  # near-deepest beams count too
         self.MIN_GAP_RANGE = float(p('min_gap_range').value)  # shallower deepest: no gap (m)
         self.SURFACE_SPAN = math.radians(60.0)               # obstacle surface searched (rad)
@@ -283,35 +288,37 @@ class GapFollowNode(Node):
 
     # [ Step 1 ] clean the scan
 
-    def preprocess_scan(self, scan: LaserScan) -> tuple[np.ndarray, np.ndarray]:
+    def preprocess_scan(self, scan: LaserScan,
+                        cap: float | None = None) -> tuple[np.ndarray, np.ndarray]:
         """
         Clean up invalid readings and cap the ranges (the whole scan is kept).
 
         Args:
             scan: LaserScan message
+            cap: range cap (m); MAX_RANGE if None
 
         Returns:
             ranges: cleaned ranges in meters        (0.0 means invalid)
             angles: angle in radians of each range  (positive angle indicates left)
         """
+        cap = self.MAX_RANGE if cap is None else cap
         ranges = np.asarray(scan.ranges, dtype=float)
         angles = scan.angle_min + np.arange(ranges.size) * scan.angle_increment
 
         with np.errstate(invalid='ignore'):
             # no return (inf, or beyond range_max) means open space: cap it
-            ranges = np.where(np.isposinf(ranges) | (ranges > scan.range_max),
-                              self.MAX_RANGE, ranges)
+            ranges = np.where(np.isposinf(ranges) | (ranges > scan.range_max), cap, ranges)
             # NaN and readings below range_min are invalid
             bad = ~np.isfinite(ranges) | (ranges < scan.range_min)
         ranges[bad] = 0.0
 
         # cap long ranges (Tweak 4)
-        return np.minimum(ranges, self.MAX_RANGE), angles
+        return np.minimum(ranges, cap), angles
 
     # [ Step 2 ] extend the disparities
 
     def extend_disparities(self, ranges: np.ndarray, boxes: np.ndarray,
-                           angle_increment: float) -> np.ndarray:
+                           angle_increment: float, margin: float | None = None) -> np.ndarray:
         """
         Extend every disparity over the farther side by the car's half-width plus a margin.
 
@@ -336,6 +343,7 @@ class GapFollowNode(Node):
         """
         extended = ranges.copy()
         n = ranges.size
+        plain_margin = self.MARGIN if margin is None else margin
 
         # disparities: consecutive valid beams (missing returns between them skipped) whose
         # ranges jump by more than the threshold; i is the lower beam index, j the upper
@@ -347,8 +355,8 @@ class GapFollowNode(Node):
             near = min(ranges[i], ranges[j])
 
             # a box the camera confirmed gets the wider margin
-            margin = self.BOX_MARGIN if (boxes[i] or boxes[j]) else self.MARGIN
-            width = self.CAR_HALF_WIDTH + margin
+            edge_margin = self.BOX_MARGIN if (boxes[i] or boxes[j]) else plain_margin
+            width = self.CAR_HALF_WIDTH + edge_margin
 
             # the near obstacle's surface: the valid beams from the edge back to its other
             # edge (the next disparity), at most SURFACE_SPAN away
@@ -423,32 +431,21 @@ class GapFollowNode(Node):
 
     # [ Step 4 ] steering
 
-    def lane_centre(self, ranges: np.ndarray,
-                    angles: np.ndarray) -> tuple[float, float, float] | None:
+    def side_walls(self, ranges: np.ndarray,
+                   angles: np.ndarray) -> tuple[float, float, float, float] | None:
         """
-        Find the middle line of the lane between the walls beside the car, on a clear straight.
-
-        Each side wall is fitted with a line, so the middle line carries both where the
-        middle is (how far left) and which way the lane runs (its slope). Aiming at a point
-        on it, rather than only pulling the car sideways, also turns the car parallel to the
-        walls, so it settles on the middle instead of crossing it and correcting back.
+        Fit a line to each side wall beside the car, on a straight.
 
         Args:
             ranges: cleaned ranges (0.0 = invalid)
             angles: angle of each beam (rad)
 
         Returns:
-            (offset, slope, wall): the middle line y = offset + slope x (m, left positive,
-            from the LiDAR) and the distance to the nearer side wall (m); None unless
-            there is a wall within LANE_MAX on both sides (beams 45 to 100 degrees each
-            side) and nothing nearer than the range cap in the 0.5 m wide strip straight
-            ahead: near a box or a turn the gap target decides alone.
-            The side walls themselves do not count as being in that strip (a point within
-            0.1 m of a wall's line is that wall): close to a wall and angled a little
-            towards it, the wall entered the strip and switched the centring off exactly
-            when it was needed (seen in the car's bag).
+            (left, left_slope, right, right_slope): the left wall at y = left + left_slope x
+            and the right wall at y = -(right + right_slope x) (m, from the LiDAR); None
+            unless both walls are within LANE_MAX (beams 45 to 100 degrees each side) and
+            run the same way within 30 degrees
         """
-        # fit a line to each side wall (left, then right); give up if a side has no wall
         walls = []
         for sign in (1.0, -1.0):
             beside = ((angles * sign >= math.radians(45.0))
@@ -462,9 +459,92 @@ class GapFollowNode(Node):
             slope, lateral = np.polyfit(x[near], y[near], 1)   # wall: y = lateral + slope x
             walls.append((float(lateral), float(slope)))
         (left, left_slope), (right, right_slope) = walls
-        # the walls run the same way (within 30 degrees): otherwise it is not a straight
         if abs(math.atan(left_slope) + math.atan(right_slope)) > math.radians(30.0):
             return None
+        return left, left_slope, right, right_slope
+
+    def overtake_view(self, scan: LaserScan, angles: np.ndarray,
+                      walls: tuple[float, float, float, float] | None) -> float | None:
+        """
+        Return how far to look for a gap when something to overtake is in the lane ahead.
+
+        The gap search sees only MAX_RANGE, but the braking limit sees the whole scan: a
+        slower car 4 m ahead made the planner brake, and it only steered round once the car
+        was within MAX_RANGE, so it passed from close behind at the other car's speed. On a
+        straight, with something in the lane within OVERTAKE_TIME of driving that leaves room
+        to pass beside it, the gap search looks that far instead, so the car picks its side
+        and changes lane early, at speed.
+
+        Not for a turn or a blocked lane: the object must stand clear of both walls (a wall
+        bending into the lane at a turn starts at the wall) and leave room for the car plus
+        PASS_MARGIN each side on one side of it.
+
+        Args:
+            scan: LaserScan being processed (uncapped ranges are used)
+            angles: angle of each beam (rad)
+            walls: from side_walls(), or None (not on a straight)
+
+        Returns:
+            view: range for the gap search (m), or None for the normal MAX_RANGE
+        """
+        if walls is None or self.OVERTAKE_TIME <= 0.0:
+            return None
+        far = min(self.OVERTAKE_MAX, self.OVERTAKE_TIME * self.lookahead_speed())
+        if far <= self.MAX_RANGE:
+            return None                 # slow: the normal view already sees far enough
+        left, left_slope, right, right_slope = walls
+        r = clean_lidar(scan.ranges, scan.range_min, scan.range_max)
+        ok = np.isfinite(r)
+        x, y = r[ok] * np.cos(angles[ok]), r[ok] * np.sin(angles[ok])
+        ahead = (x > 0.0) & (x < far)
+        x, y = x[ahead], y[ahead]
+        # in the lane: clear of both wall lines (the lines are less sure farther out)
+        tol = 0.10 + 0.02 * x
+        inside = (y < left + left_slope * x - tol) & (y > -(right + right_slope * x) + tol)
+        if not inside.any():
+            return None
+        # the nearest object in the lane: its points within 0.6 m behind its front
+        x0 = float(x[inside].min())
+        obj = inside & (x < x0 + 0.6)
+        gap_left = left + left_slope * x0 - float(y[obj].max())
+        gap_right = float(y[obj].min()) + right + right_slope * x0
+        detached = min(gap_left, gap_right) >= 0.15 + 0.02 * x0
+        room = max(gap_left, gap_right) >= 2.0 * (self.CAR_HALF_WIDTH + self.PASS_MARGIN)
+        return far if detached and room else None
+
+    def lane_centre(self, ranges: np.ndarray, angles: np.ndarray,
+                    walls: tuple[float, float, float, float] | None = None
+                    ) -> tuple[float, float, float] | None:
+        """
+        Find the middle line of the lane between the walls beside the car, on a clear straight.
+
+        Each side wall is fitted with a line, so the middle line carries both where the
+        middle is (how far left) and which way the lane runs (its slope). Aiming at a point
+        on it, rather than only pulling the car sideways, also turns the car parallel to the
+        walls, so it settles on the middle instead of crossing it and correcting back.
+
+        Args:
+            ranges: cleaned ranges (0.0 = invalid)
+            angles: angle of each beam (rad)
+            walls: from side_walls() if already fitted, else fitted here
+
+        Returns:
+            (offset, slope, wall): the middle line y = offset + slope x (m, left positive,
+            from the LiDAR) and the distance to the nearer side wall (m); None unless
+            there is a wall within LANE_MAX on both sides (beams 45 to 100 degrees each
+            side) and nothing nearer than the range cap in the 0.5 m wide strip straight
+            ahead: near a box or a turn the gap target decides alone.
+            The side walls themselves do not count as being in that strip (a point within
+            0.1 m of a wall's line is that wall): close to a wall and angled a little
+            towards it, the wall entered the strip and switched the centring off exactly
+            when it was needed (seen in the car's bag).
+        """
+        # a line for each side wall; none (not a straight): no middle line
+        if walls is None:
+            walls = self.side_walls(ranges, angles)
+        if walls is None:
+            return None
+        left, left_slope, right, right_slope = walls
         # points in the 0.5 m wide strip ahead of the car
         ahead = (np.abs(angles) < math.pi / 2) & (ranges > 0.0) & (ranges < 0.95 * self.MAX_RANGE)
         x = ranges[ahead] * np.cos(angles[ahead])
@@ -759,15 +839,22 @@ class GapFollowNode(Node):
                 return
             boxes = self.box_beams(ranges.size)
 
-            # b. extend the disparities
-            extended = self.extend_disparities(ranges, boxes, msg.angle_increment)
+            # b. extend the disparities. Overtaking (something passable in the lane ahead):
+            # look further, pass with PASS_MARGIN, and follow the gap, not the middle line
+            walls = self.side_walls(ranges, angles)
+            view = self.overtake_view(msg, angles, walls)
+            if view is None:
+                plan, margin, centre = ranges, None, self.lane_centre(ranges, angles, walls)
+            else:
+                plan, margin, centre = self.preprocess_scan(msg, view)[0], self.PASS_MARGIN, None
+            extended = self.extend_disparities(plan, boxes, msg.angle_increment, margin)
 
             # c. find the target and steer to it
             index = self.find_target(extended, angles)
             if index is None:
                 return          # no gap: nothing is published, and the safety watchdog brakes
             wanted_steering = self.calculate_steering_angle(
-                float(angles[index]), float(extended[index]), self.lane_centre(ranges, angles))
+                float(angles[index]), float(extended[index]), centre)
             # the trim only cancels the servo's pull: the car really steers command - trim,
             # and that is the path to check. With the command itself, a straight driven with
             # 0.05 rad of trim looked like an arc into the wall 2.3 m ahead, which held the
